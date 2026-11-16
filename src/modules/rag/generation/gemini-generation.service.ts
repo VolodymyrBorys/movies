@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { geminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
 import type {
   GenerateAnswerInput,
@@ -61,10 +62,6 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export class GeminiGenerationService {
   async generate(input: GenerateAnswerInput): Promise<GenerateAnswerResult> {
     const question = input.question.trim();
@@ -90,12 +87,24 @@ User question:
 ${question}
 `;
 
+    // Retries are done here only: SDK @google/genai 3.x retries HTTP calls
+    // solely when httpOptions.retryOptions is set, and our client doesn't set it.
+    // Note: aborting is client-side only; Gemini may still bill the request.
+    const callerSignal = input.signal;
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      callerSignal?.throwIfAborted();
+
+      // Per-attempt timeout, combined with the caller's cancellation signal.
       const controller = new AbortController();
 
       const timeout = setTimeout(() => {
         controller.abort();
       }, REQUEST_TIMEOUT_MS);
+
+      const signal = callerSignal
+        ? AbortSignal.any([callerSignal, controller.signal])
+        : controller.signal;
 
       try {
         console.log(`[Gemini] Request attempt ${attempt}/${MAX_ATTEMPTS}`);
@@ -109,7 +118,7 @@ ${question}
             systemInstruction: SYSTEM_INSTRUCTION,
             temperature: 0.2,
             maxOutputTokens: 2048,
-            abortSignal: controller.signal,
+            abortSignal: signal,
           },
         });
 
@@ -127,6 +136,11 @@ ${question}
           model: MODEL,
         };
       } catch (error: unknown) {
+        // Cancelled by the caller: never retry.
+        if (callerSignal?.aborted) {
+          throw error;
+        }
+
         if (controller.signal.aborted) {
           throw new Error(
             `Gemini request timed out after ${REQUEST_TIMEOUT_MS}ms`,
@@ -151,7 +165,12 @@ ${question}
             `Retrying in ${retryDelay}ms`,
         );
 
-        await delay(retryDelay);
+        // Backoff wait is cancellable by the caller as well.
+        await sleep(
+          retryDelay,
+          undefined,
+          callerSignal ? { signal: callerSignal } : undefined,
+        );
       } finally {
         clearTimeout(timeout);
       }

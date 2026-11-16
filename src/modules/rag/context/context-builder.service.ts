@@ -30,8 +30,12 @@ export class ContextBuilderService {
       };
     }
 
-    // 1. Filter by minimum similarity score.
-    const filtered = results.filter((result) => result.score >= minScore);
+    // 1. Filter by minimum similarity score; drop chunks without content,
+    //    otherwise their metadata labels alone would make the context non-empty.
+    const filtered = results.filter(
+      (result) =>
+        result.score >= minScore && result.payload.content.trim() !== "",
+    );
 
     // 2. Sort by relevance.
     const sorted = [...filtered].sort((a, b) => b.score - a.score);

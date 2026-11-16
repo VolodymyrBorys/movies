@@ -1,23 +1,14 @@
 import { qdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
 import { embeddingService } from "../embedding/embedding.service.ts";
-import type { QdrantDocumentPayload } from "./qdrant.types.ts";
+import type {
+  QdrantDocumentPayload,
+  QdrantSearchOptions,
+  QdrantSearchResult,
+} from "./qdrant.types.ts";
 
 const COLLECTION_NAME = "technical_documents";
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 50;
-
-export interface QdrantSearchOptions {
-  limit?: number;
-  scoreThreshold?: number;
-  documentId?: string;
-  source?: string;
-}
-
-export interface QdrantSearchResult {
-  id: string | number;
-  score: number;
-  payload: QdrantDocumentPayload;
-}
 
 function validatePayload(
   payload: Record<string, unknown> | null,
@@ -116,10 +107,6 @@ export class QdrantSearchService {
         ? { score_threshold: scoreThreshold }
         : {}),
       ...(must.length > 0 ? { filter: { must } } : {}),
-    });
-
-    console.dir(response.points[0]?.payload, {
-      depth: null,
     });
 
     // 4. Convert Qdrant response into our domain result.

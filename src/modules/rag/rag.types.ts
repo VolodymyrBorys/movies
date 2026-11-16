@@ -1,19 +1,17 @@
-import type { ContextSource } from "./context/context.types.ts";
+import type {
+  ContextBuilderOptions,
+  ContextSource,
+} from "./context/context.types.ts";
+import type { QdrantSearchOptions } from "./vector-store/qdrant.types.ts";
 
 export interface RagAnswerInput {
   question: string;
 }
 
+// Same public shape as before; reuses the owning services' option types.
 export interface RagAnswerOptions {
-  retrieval?: {
-    limit?: number;
-    scoreThreshold?: number;
-  };
-  context?: {
-    maxChunks?: number;
-    minScore?: number;
-    maxContextChars?: number;
-  };
+  retrieval?: Pick<QdrantSearchOptions, "limit" | "scoreThreshold">;
+  context?: ContextBuilderOptions;
 }
 
 export interface RagAnswerResult {
