@@ -50,7 +50,11 @@ function raceWithSignal<T>(
     return promise;
   }
 
-  signal.throwIfAborted();
+  if (signal.aborted) {
+    // Already-started promise must not become an unhandled rejection.
+    promise.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
 
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
@@ -137,6 +141,10 @@ export class QdrantSearchService {
     }
 
     // 3. Execute vector search (not started if cancelled during embedding).
+    // Must be checked here: the query() argument below is evaluated before
+    // raceWithSignal runs, so a check inside it would come too late.
+    signal?.throwIfAborted();
+
     const response = await raceWithSignal(
       qdrantClient.query(COLLECTION_NAME, {
         query: queryVector,
