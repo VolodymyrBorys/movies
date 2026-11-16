@@ -47,6 +47,7 @@ export class RagService {
     const generation = await geminiGenerationService.generate({
       question,
       context: context.text,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
 
     // 4. Return answer, sources and metadata.

@@ -12,6 +12,8 @@ export interface RagAnswerInput {
 export interface RagAnswerOptions {
   retrieval?: Pick<QdrantSearchOptions, "limit" | "scoreThreshold">;
   context?: ContextBuilderOptions;
+  /** Cancels embedding, the Qdrant query (soft) and Gemini generation. */
+  signal?: AbortSignal;
 }
 
 export interface RagAnswerResult {
