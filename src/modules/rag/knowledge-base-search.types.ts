@@ -13,6 +13,8 @@ export interface KnowledgeBaseSearchInput {
 export interface KnowledgeBaseSearchOptions {
   retrieval?: QdrantSearchOptions;
   context?: ContextBuilderOptions;
+  /** Cancels embedding (hard, client-side) and the Qdrant query (soft). */
+  signal?: AbortSignal;
 }
 
 export interface KnowledgeBaseSearchResult {

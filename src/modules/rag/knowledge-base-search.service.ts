@@ -21,6 +21,7 @@ export class KnowledgeBaseSearchService {
     const searchResults = await qdrantSearchService.search(
       query,
       options.retrieval,
+      options.signal,
     );
 
     // 2. Build context from retrieved chunks (defaults + validation inside).

@@ -38,6 +38,38 @@ function validatePayload(
   };
 }
 
+// @qdrant/js-client-rest 1.20 has no per-request AbortSignal (its timeout
+// middleware overwrites init.signal). This is a soft cancel: the caller is
+// released immediately, the HTTP request itself runs until it completes or hits
+// the client timeout. Acceptable for a read-only, idempotent search.
+function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+
+  signal.throwIfAborted();
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    // Both branches are handled, so a late rejection never becomes unhandled.
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function validateOptions(options: QdrantSearchOptions): void {
   const { limit = DEFAULT_LIMIT, scoreThreshold } = options;
 
@@ -59,7 +91,10 @@ export class QdrantSearchService {
   async search(
     query: string,
     options: QdrantSearchOptions = {},
+    signal?: AbortSignal,
   ): Promise<QdrantSearchResult[]> {
+    signal?.throwIfAborted();
+
     const normalizedQuery = query.trim();
 
     if (!normalizedQuery) {
@@ -76,7 +111,10 @@ export class QdrantSearchService {
     } = options;
 
     // 1. Convert user query into an embedding.
-    const queryVector = await embeddingService.embedQuery(normalizedQuery);
+    const queryVector = await embeddingService.embedQuery(
+      normalizedQuery,
+      signal,
+    );
 
     // 2. Build optional metadata filters.
     const must: Array<{
@@ -98,16 +136,19 @@ export class QdrantSearchService {
       });
     }
 
-    // 3. Execute vector search.
-    const response = await qdrantClient.query(COLLECTION_NAME, {
-      query: queryVector,
-      limit,
-      with_payload: true,
-      ...(scoreThreshold !== undefined
-        ? { score_threshold: scoreThreshold }
-        : {}),
-      ...(must.length > 0 ? { filter: { must } } : {}),
-    });
+    // 3. Execute vector search (not started if cancelled during embedding).
+    const response = await raceWithSignal(
+      qdrantClient.query(COLLECTION_NAME, {
+        query: queryVector,
+        limit,
+        with_payload: true,
+        ...(scoreThreshold !== undefined
+          ? { score_threshold: scoreThreshold }
+          : {}),
+        ...(must.length > 0 ? { filter: { must } } : {}),
+      }),
+      signal,
+    );
 
     // 4. Convert Qdrant response into our domain result.
     return response.points.map((point) => ({

@@ -4,28 +4,31 @@ const MODEL = "gemini-embedding-001";
 const DIMENSIONS = 768;
 
 export class EmbeddingService {
-  async embedDocument(text: string): Promise<number[]> {
-    return this.embed(text, "RETRIEVAL_DOCUMENT");
+  async embedDocument(text: string, signal?: AbortSignal): Promise<number[]> {
+    return this.embed(text, "RETRIEVAL_DOCUMENT", signal);
   }
 
-  async embedQuery(text: string): Promise<number[]> {
-    return this.embed(text, "RETRIEVAL_QUERY");
+  async embedQuery(text: string, signal?: AbortSignal): Promise<number[]> {
+    return this.embed(text, "RETRIEVAL_QUERY", signal);
   }
 
   private async embed(
     text: string,
     taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY",
+    signal?: AbortSignal,
   ): Promise<number[]> {
     if (!text.trim()) {
       throw new Error("Text cannot be empty");
     }
 
+    // Client-side cancellation only: Gemini may still bill a request already sent.
     const response = await geminiClient.models.embedContent({
       model: MODEL,
       contents: text,
       config: {
         taskType,
         outputDimensionality: DIMENSIONS,
+        ...(signal ? { abortSignal: signal } : {}),
       },
     });
 
