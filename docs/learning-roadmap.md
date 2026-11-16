@@ -17,18 +17,18 @@ The goal is to evolve it **incrementally** into a production-like system and, at
 
 ## 2. Learning objectives
 
-| Area | Objective (what "learned" means here) |
-|---|---|
-| Backend architecture | Design a Node.js/TS service with explicit boundaries, typed errors, idempotent handlers, bounded retries, graceful shutdown. |
-| PostgreSQL | Read query plans, choose indexes, reason about MVCC/locks/isolation, size pools, handle replica lag, run safe migrations. |
-| Redis | Cache patterns, invalidation, stampede protection, eviction, persistence, replication/failover, failure behavior. |
-| RabbitMQ | Exchanges/queues, publisher confirms, acks/redelivery, prefetch, DLX, quorum queues, outbox → broker relay. |
-| AI engineering | Production RAG (retrieval quality, evals, cost, failure modes), tool-calling agents, MCP, agent evaluation and observability. |
-| Observability | RED/USE metrics, exporters, dashboards, alert rules you can act on, distributed tracing with context propagation. |
-| Logging | Structured logs, centralized search, correlation by `requestId`/`traceId`, incident investigation workflow. |
-| Performance | Reproducible load tests, bottleneck identification, capacity planning backed by numbers. |
-| Kubernetes | Deploy, probe, scale and shut down the service correctly; understand Services, networking, Gateway API, TLS. |
-| Cloud / IaC | AWS networking and IAM, Terraform workflows, EKS, managed vs self-hosted trade-offs, CI/CD. |
+| Area                 | Objective (what "learned" means here)                                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Backend architecture | Design a Node.js/TS service with explicit boundaries, typed errors, idempotent handlers, bounded retries, graceful shutdown.  |
+| PostgreSQL           | Read query plans, choose indexes, reason about MVCC/locks/isolation, size pools, handle replica lag, run safe migrations.     |
+| Redis                | Cache patterns, invalidation, stampede protection, eviction, persistence, replication/failover, failure behavior.             |
+| RabbitMQ             | Exchanges/queues, publisher confirms, acks/redelivery, prefetch, DLX, quorum queues, outbox → broker relay.                   |
+| AI engineering       | Production RAG (retrieval quality, evals, cost, failure modes), tool-calling agents, MCP, agent evaluation and observability. |
+| Observability        | RED/USE metrics, exporters, dashboards, alert rules you can act on, distributed tracing with context propagation.             |
+| Logging              | Structured logs, centralized search, correlation by `requestId`/`traceId`, incident investigation workflow.                   |
+| Performance          | Reproducible load tests, bottleneck identification, capacity planning backed by numbers.                                      |
+| Kubernetes           | Deploy, probe, scale and shut down the service correctly; understand Services, networking, Gateway API, TLS.                  |
+| Cloud / IaC          | AWS networking and IAM, Terraform workflows, EKS, managed vs self-hosted trade-offs, CI/CD.                                   |
 
 ## 3. Target architecture
 
@@ -44,7 +44,7 @@ Target state after all phases. Components marked `*` do **not** exist yet.
         ┌───────────────────▼────────────────────┐         ┌──────────────────────┐
         │ movies-api (Deployment, HPA*)          │         │ Gemini API (external)│
         │  /v1/movies   /v1/rag*  /v1/agent*     │────────▶│ embed / generate     │
-        │  /v1/metrics  /healthz* /readyz*       │         └──────────────────────┘
+        │  /v1/metrics  /healthz  /readyz        │         └──────────────────────┘
         └───┬────────────┬───────────┬───────────┘
             │            │           │
    ┌────────▼───┐  ┌─────▼────┐  ┌───▼──────┐
@@ -83,45 +83,45 @@ Verified by reading the code at `19744cd`. "Not verified at runtime" means the c
 
 ### 4.1 Implemented
 
-| Capability | Where |
-|---|---|
-| Express 5 app, `helmet`, `x-powered-by` disabled, JSON body limit 1 MB, JSON 404, central `errorHandler` | `src/app.ts`, `src/utils/errors.ts` |
-| pino + pino-http, `requestId` (UUID) in logs and `x-request-id` header, header redaction | `src/app.ts`, `src/infrastructure/logger.ts` |
-| PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release | `src/infrastructure/postgres.ts` |
-| Zod fail-fast env config (PostgreSQL only), production requires `PG_SSL=verify-full` | `src/config/env.ts` |
-| Keyset (cursor) pagination in repository (`id >/< $cursor`, `limit + 1` for `hasMore`) | `src/modules/movies/movies.repository.ts`, `cursor.ts` |
-| Redis list cache with version key `movies:list:version`, TTL 60 s + jitter, `SET NX` version init, PG fallback on cache read failure, cache write failure doesn't fail GET | `src/modules/movies/movies.service.ts`, `src/infrastructure/redis.ts` |
-| Redis client: 1 s command timeout, offline queue disabled, reconnect with exponential backoff + jitter, keepalive, ping | `src/infrastructure/redis.ts` |
-| Transactional outbox: mutation + `INSERT cache_invalidation_outbox` in one transaction; best-effort immediate invalidation after commit | `movies.repository.ts`, `movies.service.ts` |
-| Outbox worker: `FOR UPDATE SKIP LOCKED` claim, 30 s lease, owner-checked updates, backoff + jitter (cap 5 min), dead-letter after 20 attempts | `src/workers/cache-invalidation.ts`, `cache-invalidation-runner.ts` |
-| Graceful shutdown: stop HTTP → stop worker → close PG/Redis; 15 s forced exit; `unhandledRejection` → shutdown | `src/server.ts` |
-| Prometheus: default Node.js metrics, `http_requests_total`, `http_request_duration_seconds` with route template labels; `GET /v1/metrics` | `src/infrastructure/metrics.ts`, `src/routes/metrics.ts` |
-| RAG pipeline (embed → Qdrant search → bounded context → Gemini generate), cancellation, retry only in generation, 70 unit tests | `src/modules/rag/`, see `docs/progress/rag.md` |
-| Hand-written HTTP load test (concurrency, p50/p95/p99, status counts) | `scripts/load-test.ts` |
+| Capability                                                                                                                                                                                | Where                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Express 5 app, `helmet`, `x-powered-by` disabled, JSON body limit 1 MB, JSON 404, central `errorHandler`                                                                                  | `src/app.ts`, `src/utils/errors.ts`                                   |
+| pino + pino-http, `requestId` (UUID) in logs and `x-request-id` header, header redaction                                                                                                  | `src/app.ts`, `src/infrastructure/logger.ts`                          |
+| PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release | `src/infrastructure/postgres.ts`                                      |
+| Zod fail-fast env config (PostgreSQL only), production requires `PG_SSL=verify-full`                                                                                                      | `src/config/env.ts`                                                   |
+| Keyset (cursor) pagination in repository (`id >/< $cursor`, `limit + 1` for `hasMore`)                                                                                                    | `src/modules/movies/movies.repository.ts`, `cursor.ts`                |
+| Redis list cache with version key `movies:list:version`, TTL 60 s + jitter, `SET NX` version init, PG fallback on cache read failure, cache write failure doesn't fail GET                | `src/modules/movies/movies.service.ts`, `src/infrastructure/redis.ts` |
+| Redis client: 1 s command timeout, offline queue disabled, reconnect with exponential backoff + jitter, keepalive, ping                                                                   | `src/infrastructure/redis.ts`                                         |
+| Transactional outbox: mutation + `INSERT cache_invalidation_outbox` in one transaction; best-effort immediate invalidation after commit                                                   | `movies.repository.ts`, `movies.service.ts`                           |
+| Outbox worker: `FOR UPDATE SKIP LOCKED` claim, 30 s lease, owner-checked updates, backoff + jitter (cap 5 min), dead-letter after 20 attempts                                             | `src/workers/cache-invalidation.ts`, `cache-invalidation-runner.ts`   |
+| Graceful shutdown: stop HTTP → stop worker → close PG/Redis; 15 s forced exit; `unhandledRejection` → shutdown                                                                            | `src/server.ts`                                                       |
+| Prometheus: default Node.js metrics, `http_requests_total`, `http_request_duration_seconds` with route template labels; `GET /v1/metrics`                                                 | `src/infrastructure/metrics.ts`, `src/routes/metrics.ts`              |
+| RAG pipeline (embed → Qdrant search → bounded context → Gemini generate), cancellation, retry only in generation, 70 unit tests                                                           | `src/modules/rag/`, see `docs/progress/rag.md`                        |
+| Hand-written HTTP load test (concurrency, p50/p95/p99, status counts)                                                                                                                     | `scripts/load-test.ts`                                                |
 
 ### 4.2 Partially implemented / known gaps
 
-| Gap | Evidence | Impact |
-|---|---|---|
-| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (uncommitted) | Query validation wired, cursor is keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. HTTP tests in `src/routes/movies.test.ts` need local port binding (blocked in the sandbox) — run them outside it. | Not yet verified against a real DB (integration test still missing). |
-| `movies.status` / `movies.version` are nullable | Baseline migration mirrors the DB as is; `version + 1` on NULL stays NULL. | Tighten with a later migration (P3, together with optimistic concurrency). |
-| DELETE and CREATE not exposed | `deleteMovie` exists in controller/service/repository but has no route; `validation/create-movie.ts` has no route or repository method. | Write path only via `PATCH`. |
-| Optimistic concurrency is half-done | `version = version + 1` on update, but no `WHERE version = $expected` / `If-Match`. | Lost updates are possible; good Phase 3 exercise. |
-| Config centralization | Only PG in `env.ts`. Redis URL hardcoded (`redis://localhost:6379`); `PORT`, `LOG_LEVEL`, Qdrant/Gemini read `process.env` directly; several modules call `loadEnvFile`. | Not deployable to K8s without code changes. |
-| Logging consistency | `console.*` in worker, PG, Redis, movies service, RAG generation. | Those lines are not structured, have no `requestId`, won't be searchable in Elasticsearch. |
-| Error model | `AppError` exists; movies service has its own `InvalidMoviesQueryError`; RAG uses plain `Error`. | Inconsistent HTTP mapping. |
-| Metrics coverage | HTTP only. No PG pool, cache hit/miss, outbox backlog/dead-letter, RAG stage metrics. Default label `service: "streaming-api"` doesn't match the project name. | Cannot alert on the mechanisms that matter. |
-| Worker runs inside the API process | `startCacheInvalidationWorker()` in `server.ts`. | Cannot scale/deploy API and worker independently. |
-| Installed but unused | OpenTelemetry packages (never initialized), `piscina` (commented out), `supertest`, `autocannon`, `src/utils/retry.ts` (not imported). | Dependencies without a use case yet. |
-| RAG | No HTTP endpoint; successful generation never observed (Gemini 503); open issues list in `docs/progress/rag.md`. | — |
-| Legacy modules | `src/modules/{ingestion,retrieval,generation}/` not imported. | Keep until an explicit task decides. |
+| Gap                                                                                                      | Evidence                                                                                                                                                                                                                           | Impact                                                                                     |
+| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (uncommitted) | Query validation wired, cursor is keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. HTTP tests in `src/routes/movies.test.ts` need local port binding (blocked in the sandbox) — run them outside it. | Not yet verified against a real DB (integration test still missing).                       |
+| `movies.status` / `movies.version` are nullable                                                          | Baseline migration mirrors the DB as is; `version + 1` on NULL stays NULL.                                                                                                                                                         | Tighten with a later migration (P3, together with optimistic concurrency).                 |
+| DELETE and CREATE not exposed                                                                            | `deleteMovie` exists in controller/service/repository but has no route; `validation/create-movie.ts` has no route or repository method.                                                                                            | Write path only via `PATCH`.                                                               |
+| Optimistic concurrency is half-done                                                                      | `version = version + 1` on update, but no `WHERE version = $expected` / `If-Match`.                                                                                                                                                | Lost updates are possible; good Phase 3 exercise.                                          |
+| Config centralization (RAG only)                                                                         | PG, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` are in `env.ts` (2026-11-16). Qdrant/Gemini clients and RAG scripts still call `loadEnvFile` and read `process.env`; `QDRANT_URL!` unvalidated.                             | RAG cannot be configured the same way as the API.                                          |
+| Logging consistency (RAG only)                                                                           | Non-RAG code uses the pino logger (2026-11-16). `console.*` remains in RAG generation/collection services. Service-level logs have no `requestId` (no request context).                                                          | RAG logs are unstructured; correlation needs P6.                                           |
+| Error model                                                                                              | `AppError` exists; movies service has its own `InvalidMoviesQueryError`; RAG uses plain `Error`.                                                                                                                                   | Inconsistent HTTP mapping.                                                                 |
+| Metrics coverage                                                                                         | HTTP only. No PG pool, cache hit/miss, outbox backlog/dead-letter, RAG stage metrics. Default label `service: "streaming-api"` doesn't match the project name.                                                                     | Cannot alert on the mechanisms that matter.                                                |
+| Worker runs inside the API process                                                                       | `startCacheInvalidationWorker()` in `server.ts`.                                                                                                                                                                                   | Cannot scale/deploy API and worker independently.                                          |
+| Installed but unused                                                                                     | OpenTelemetry packages (never initialized), `piscina` (commented out), `supertest`, `autocannon`, `src/utils/retry.ts` (not imported).                                                                                             | Dependencies without a use case yet.                                                       |
+| RAG                                                                                                      | No HTTP endpoint; successful generation never observed (Gemini 503); open issues list in `docs/progress/rag.md`.                                                                                                                   | —                                                                                          |
+| Legacy modules                                                                                           | `src/modules/{ingestion,retrieval,generation}/` not imported.                                                                                                                                                                      | Keep until an explicit task decides.                                                       |
 
 ### 4.3 Missing
 
 - ~~DB schema / migrations in the repo~~ — **added 2026-11-16**: `node-pg-migrate`, `migrations/1794853976336_baseline.sql` (`movies`, `cache_invalidation_outbox`), `scripts/migrate.ts`, `npm run migrate:{up,down,create}`. Not yet run against a DB from this session.
 - **Local infrastructure definition** (e.g. `docker-compose.yml`) and a `Dockerfile`.
-- **Health/readiness endpoints.**
-- **Integration tests** (real PostgreSQL/Redis); HTTP-level tests.
+- ~~Health/readiness endpoints~~ — **added 2026-11-16**: `/healthz`, `/readyz` (`src/routes/health.ts`, `src/infrastructure/health.ts`).
+- **Integration tests** (real PostgreSQL/Redis). HTTP-level tests with mocked PG/Redis exist (`src/routes/*.test.ts`).
 - RabbitMQ (no code, no dependency).
 - Prometheus server config, Grafana dashboards, alert rules, exporters.
 - Distributed tracing; Elasticsearch/Kibana.
@@ -158,15 +158,17 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** None.
 
 **Scope.**
+
 1. ✅ Fix `GET /v1/movies` validation and align code with the DB schema + HTTP-level regression tests.
 2. ✅ Schema in the repo as versioned SQL migrations (`node-pg-migrate`, up + down). Remaining: run up → down → up on a disposable DB.
 3. Local infrastructure definition: PostgreSQL primary + streaming replica, Redis, Qdrant (compose file → approval).
-4. `GET /healthz` (liveness: process alive, no dependency checks) and `GET /readyz` (readiness: PG + Redis reachable, not shutting down).
-5. Sectioned config: move Redis URL, `PORT`, `LOG_LEVEL` into `env.ts` without forcing RAG scripts to require `PG_*`.
-6. Replace `console.*` with the project logger in non-RAG infrastructure code.
+4. ✅ `GET /healthz` (liveness: process alive, no dependency checks) and `GET /readyz` (readiness: not shutting down, PostgreSQL write/read pools respond; Redis is reported but never fails readiness — cache with PG fallback). Shutdown: not-ready → `SHUTDOWN_DELAY_MS` → close.
+5. ✅ Config: Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` in `env.ts` with defaults, so only `PG_*` stay required (no sectioning needed). RAG clients are still outside `env.ts`.
+6. ✅ Replace `console.*` with the project logger in non-RAG infrastructure code.
 7. Optional: CI with `npx tsc -p .` + `npm test` (CI change → approval).
 
 **Exercises.**
+
 - Bring the stack up from zero using only the repo; time it; write down every manual step that remained.
 - Run migrations up → down → up; verify the app still starts.
 - During shutdown, call `/readyz` and confirm it reports not-ready before connections close.
@@ -184,6 +186,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P0.
 
 **Scope.**
+
 - Prometheus scraping `/v1/metrics`; Grafana with provisioned dashboards (as code in repo).
 - Application metrics: cache hits/misses, PG pool (total/idle/waiting), outbox processed/failed/dead-lettered counters, outbox backlog and oldest-pending age (gauge — measure query cost first), worker batch duration.
 - Exporters: `postgres_exporter`, `redis_exporter` (RabbitMQ in P5).
@@ -191,6 +194,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - Fix `service` default label.
 
 **Exercises.**
+
 - Define an SLO (e.g. 99% of `GET /v1/movies` < 200 ms over 30 days) and write a multi-window burn-rate alert.
 - Stop Redis → watch cache-miss rate, latency (note the 1 s command timeout per request), and which alert fires.
 - Pause the worker → watch outbox backlog alert; resume and watch it resolve.
@@ -211,6 +215,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Scope.** Scenarios: read-heavy (cached), cache-cold, mixed read/write (PATCH triggers invalidation), soak (1 h), spike. Seed script for realistic data volume (e.g. 1M movies).
 
 **Exercises.**
+
 - Find the knee: increase arrival rate until p99 or errors break the SLO; identify which resource saturated first (event loop lag, PG pool, PG CPU, Redis).
 - Compare `PG_POOL_MAX` 2 / 10 / 50 under the same load; explain the curve.
 - Measure the effect of a list-version bump under load (all list keys become cold at once).
@@ -228,6 +233,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P1, P2.
 
 **Scope / exercises.**
+
 - `EXPLAIN (ANALYZE, BUFFERS)`: keyset vs `OFFSET` at deep pages; index-only scans; effect of `VACUUM`/visibility map.
 - Outbox table health: partial index `WHERE processed_at IS NULL AND dead_lettered_at IS NULL`, dead-tuple growth under load, retention/cleanup job for processed rows, autovacuum tuning.
 - Concurrency: reproduce a lost update with two concurrent PATCHes; implement optimistic concurrency (`If-Match` / `version` check → 409). Compare with `SELECT ... FOR UPDATE`.
@@ -249,6 +255,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P1, P2.
 
 **Exercises.**
+
 - Cache stampede after version bump: measure PG QPS spike; implement and compare single-flight (in-process), distributed lock, or stale-while-revalidate. Measure each.
 - Memory: `maxmemory` + `allkeys-lru` vs `volatile-ttl`; measure orphaned versioned keys and evictions.
 - Failure: Redis down / slow (latency injection) — confirm PG fallback, measure added latency; evaluate a circuit breaker vs shorter command timeout.
@@ -265,12 +272,14 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 ### Phase 5 — RabbitMQ messaging and workers
 
 **Why RabbitMQ, and why not before.** Today the outbox worker polls PostgreSQL and acts in-process — fine for one consumer. A broker becomes justified when there are **multiple independent consumers** or **slow, rate-limited work**. Concrete use cases here:
+
 1. Domain events (`movie.updated`, `movie.deleted`) fanned out to cache invalidation and future consumers.
 2. **Document ingestion for RAG**: embedding is slow, billable and rate-limited → a queue with prefetch, retries and DLQ is a natural fit.
 
 **Prerequisites.** P0, P1 (P3 helpful for outbox internals).
 
 **Scope.**
+
 - Outbox **relay**: claims outbox rows (existing SKIP LOCKED + lease) and publishes with **publisher confirms**; marks rows only after confirm. Outbox stays — it provides atomicity with the DB write.
 - Topic exchange, quorum queues, DLX with retry queues (TTL-based delays), bounded attempts.
 - Consumers in a separate worker process (split from API); manual ack; idempotency via a processed-message table or naturally idempotent handlers.
@@ -278,6 +287,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - Graceful shutdown for consumers (stop consuming, finish in-flight, ack/nack, close channel).
 
 **Exercises.**
+
 - Kill the broker mid-publish → verify no lost events (outbox retains them).
 - Crash the consumer before ack → observe redelivery; prove the handler is idempotent.
 - Poison message → ends in DLQ after N attempts; alert fires.
@@ -292,13 +302,14 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ### Phase 6 — Distributed tracing and centralized logging
 
-**Why OpenTelemetry.** Once a request crosses API → PG/Redis → outbox → RabbitMQ → worker (and later RAG → Qdrant → Gemini), metrics say *that* it is slow, traces say *where*. OTel is vendor-neutral; packages are already installed but not initialized.
+**Why OpenTelemetry.** Once a request crosses API → PG/Redis → outbox → RabbitMQ → worker (and later RAG → Qdrant → Gemini), metrics say _that_ it is slow, traces say _where_. OTel is vendor-neutral; packages are already installed but not initialized.
 
 **Why Elasticsearch/Kibana.** Full-text and structured search over logs across all processes, correlated by `requestId`/`trace_id`. Metrics and traces are sampled/aggregated; logs carry the specific error details.
 
 **Prerequisites.** P1; most valuable after P5 (async hops).
 
 **Scope.**
+
 - OTel SDK initialized before app imports (`--import`), auto-instrumentation for http/express/pg/redis; manual spans for outbox claim, cache lookup, RAG stages.
 - Context propagation through RabbitMQ message headers (manual inject/extract) — the key learning point.
 - OTel Collector → tracing backend (Jaeger or Tempo; choose at phase start). Sampling strategy (head vs tail).
@@ -307,6 +318,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - Kibana: Discover saved searches, error dashboard.
 
 **Exercises.**
+
 - Incident drill: alert fires (P1) → Grafana → exemplar/trace → logs in Kibana by `trace_id` → root cause. Write it up as a runbook.
 - Measure tracing overhead under load (P2 scenario) with sampling 100% vs 10%.
 - Verify no secrets, prompts or document bodies appear in logs/spans.
@@ -324,6 +336,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P0, P1 (P6 recommended).
 
 **Scope.**
+
 - `POST /v1/knowledge-base/search` and `POST /v1/rag/answer`: Zod validation (max question length), request-scoped `AbortSignal` tied to client disconnect + overall deadline, typed errors → 400/503/504.
 - Per-stage metrics (embed, search, generate latency; tokens; skipped generations; retries) and spans.
 - **Retrieval evaluation**: golden set of questions → expected documents; recall@k, MRR; use it to choose `minScore` and chunking parameters.
@@ -346,6 +359,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P7 (P6 strongly recommended).
 
 **Scope.**
+
 - Gemini function calling with typed tools: `searchKnowledgeBase` (wraps `KnowledgeBaseSearchService`, designed for this), `listMovies` (read-only). Any mutating tool requires an idempotency key and explicit confirmation.
 - Bounded loop: max steps, total deadline, token budget, tool timeouts; tool errors returned to the model as structured results.
 - MCP server exposing the same tools to external clients (SDK dependency → approval).
@@ -367,6 +381,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P0 (health endpoints, config), P1; worker split (P5) recommended.
 
 **Scope.**
+
 - Multi-stage `Dockerfile`, non-root, minimal image; image scan.
 - Local cluster (kind or k3d). Deployments for `api` and `worker`; Services; ConfigMap/Secret; liveness/readiness/startup probes; requests/limits; PodDisruptionBudget.
 - Graceful shutdown alignment: `preStop` delay + `terminationGracePeriodSeconds` vs the app's 15 s force-exit timer.
@@ -389,6 +404,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P9.
 
 **Scope / exercises.**
+
 - Service types, kube-proxy, DNS, NetworkPolicies (default deny, allow API → PG/Redis only).
 - GatewayClass/Gateway/HTTPRoute; TLS termination with cert-manager (self-signed locally); HTTP → HTTPS redirect.
 - Traffic splitting for canary (weights) under load; header-based routing.
@@ -408,6 +424,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Prerequisites.** P9, P10.
 
 **Scope.**
+
 - Terraform fundamentals: remote state (S3 + locking), modules, `plan` review, drift.
 - VPC (public/private subnets, NAT — cost aware), security groups, IAM least privilege, pod-level IAM (IRSA or EKS Pod Identity).
 - EKS cluster + node groups; deploy P9/P10 manifests.
@@ -426,19 +443,19 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ## 6. Testing and verification strategy (cross-cutting)
 
-| Level | Tooling | What it proves | Introduced |
-|---|---|---|---|
-| Typecheck | `npx tsc -p .` | Types/contracts compile under strict settings | exists |
-| Unit | Vitest, external I/O via `vi.mock` | Logic of a single module | exists (RAG only) |
-| HTTP / integration | Vitest + `supertest` + real PG/Redis | Wiring, validation, transactions, outbox, cache | P0 |
-| Migration | up → down → up on a real DB | Rollback path exists | P0 |
-| Failure injection | stop/pause containers, latency injection | Fallbacks, retries, alerts behave as designed | P1+ |
-| Load | k6 with thresholds | SLO under defined load; capacity | P2 |
-| Query performance | `EXPLAIN (ANALYZE, BUFFERS)` before/after | Perf claims are measured | P3 |
-| Messaging | real broker, kill/crash drills | At-least-once, idempotency, DLQ | P5 |
-| Observability | `promtool test rules`, manual alert drills | Alerts fire and resolve | P1, P6 |
-| AI evals | golden sets, fixtures, live runs | Retrieval/agent quality over time | P7, P8 |
-| Infra | `terraform validate/plan`, manifest validation | Infra changes reviewed before apply | P9–P11 |
+| Level              | Tooling                                        | What it proves                                  | Introduced        |
+| ------------------ | ---------------------------------------------- | ----------------------------------------------- | ----------------- |
+| Typecheck          | `npx tsc -p .`                                 | Types/contracts compile under strict settings   | exists            |
+| Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists (RAG only) |
+| HTTP / integration | Vitest + `supertest` + real PG/Redis           | Wiring, validation, transactions, outbox, cache | P0                |
+| Migration          | up → down → up on a real DB                    | Rollback path exists                            | P0                |
+| Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
+| Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
+| Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | P3                |
+| Messaging          | real broker, kill/crash drills                 | At-least-once, idempotency, DLQ                 | P5                |
+| Observability      | `promtool test rules`, manual alert drills     | Alerts fire and resolve                         | P1, P6            |
+| AI evals           | golden sets, fixtures, live runs               | Retrieval/agent quality over time               | P7, P8            |
+| Infra              | `terraform validate/plan`, manifest validation | Infra changes reviewed before apply             | P9–P11            |
 
 Rules: never change a test to make wrong code pass; bug fix → regression test; performance claims need numbers; "verified" means the command actually ran.
 
