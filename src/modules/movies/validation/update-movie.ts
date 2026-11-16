@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 export const updateMovieParamsSchema = z.object({
-  id: z.string().regex(/^[1-9]\d*$/, "Invalid movie id"),
+  // movies.id is uuid (DB schema is the source of truth).
+  id: z.uuid("Invalid movie id"),
 });
 
 export const updateMovieBodySchema = z

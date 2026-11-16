@@ -15,7 +15,7 @@ export const router = Router();
 
 router.get(
   "/movies",
-  validate("params", getMoviesQuerySchema),
+  validate("query", getMoviesQuerySchema),
   asyncHandler(getMovies),
 );
 

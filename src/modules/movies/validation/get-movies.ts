@@ -9,13 +9,8 @@ export const getMoviesQuerySchema = z.object({
     .optional()
     .transform((value) => value ?? 20),
 
-  offset: z
-    .string()
-    .regex(/^\d+$/, "offset must be an integer")
-    .transform(Number)
-    .pipe(z.number().int().min(0).max(1_000_000))
-    .optional()
-    .transform((value) => value ?? 0),
+  // Opaque keyset cursor; its content is decoded and validated in the service.
+  cursor: z.string().min(1).max(128).optional(),
 
   sort: z.enum(["asc", "desc"]).optional().default("desc"),
 });

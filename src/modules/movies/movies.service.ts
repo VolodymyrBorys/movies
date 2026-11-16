@@ -1,12 +1,16 @@
 import { REDIS } from "../../infrastructure/redis.ts";
-import { decodeMovieCursor } from "./cursor.ts";
+import { AppError } from "../../utils/errors.ts";
+import {
+  decodeMovieCursor,
+  encodeMovieCursor,
+  type MovieCursor,
+} from "./cursor.ts";
 import { moviesRepository } from "./movies.repository.ts";
 
-export class InvalidMoviesQueryError extends Error {
-  readonly statusCode = 400;
-
+// Extends AppError so errorHandler maps it to 400 (a plain Error became 500).
+export class InvalidMoviesQueryError extends AppError {
   constructor(message: string) {
-    super(message);
+    super(message, { code: "VALIDATION_ERROR", statusCode: 400 });
     this.name = "InvalidMoviesQueryError";
   }
 }
@@ -14,7 +18,7 @@ export class InvalidMoviesQueryError extends Error {
 export class MovieService {
   async getMovies(query: {
     limit: number;
-    cursor?: string;
+    cursor?: string | undefined;
     sort: "asc" | "desc";
   }) {
     const { limit, sort } = query;
@@ -25,12 +29,12 @@ export class MovieService {
       );
     }
 
-    let cursor: string | null;
+    let cursor: MovieCursor | null;
 
     try {
       cursor = decodeMovieCursor(query.cursor);
     } catch {
-      throw new InvalidMoviesQueryError("sort must be asc or desc");
+      throw new InvalidMoviesQueryError("cursor is invalid");
     }
 
     let cacheAvailable = true;
@@ -41,7 +45,7 @@ export class MovieService {
 
     try {
       const listVersion = await REDIS.getMoviesListVersion();
-      cacheKey = `movies:v1:list:v${listVersion}:limit:${limit}:sort:${sort}:cursor:${cursor ?? "first"}`;
+      cacheKey = `movies:v1:list:v${listVersion}:limit:${limit}:sort:${sort}:cursor:${cursor === null ? "first" : encodeMovieCursor(cursor)}`;
       const cached = await REDIS.get(cacheKey);
       if (cached !== null) return cached;
     } catch (error) {

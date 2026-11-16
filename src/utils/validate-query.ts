@@ -1,11 +1,12 @@
 import type { RequestHandler } from "express";
 import type { ZodType } from "zod";
 
-type RequestPart = "body" | "params";
+type RequestPart = "body" | "params" | "query";
 
 export function validate(part: RequestPart, schema: ZodType): RequestHandler {
   return (req, res, next) => {
-    const input: unknown = part === "body" ? req.body : req.params;
+    const input: unknown =
+      part === "body" ? req.body : part === "query" ? req.query : req.params;
 
     const result = schema.safeParse(input);
 
@@ -23,8 +24,11 @@ export function validate(part: RequestPart, schema: ZodType): RequestHandler {
       return;
     }
 
+    // Express 5: req.query is a read-only getter, so parsed values go to res.locals.
     if (part === "body") {
       res.locals.validatedBody = result.data;
+    } else if (part === "query") {
+      res.locals.validatedQuery = result.data;
     } else {
       res.locals.validatedParams = result.data;
     }
