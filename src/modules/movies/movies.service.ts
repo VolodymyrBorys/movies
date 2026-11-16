@@ -1,4 +1,5 @@
 import { REDIS } from "../../infrastructure/redis.ts";
+import { logger as rootLogger } from "../../infrastructure/logger.ts";
 import { AppError } from "../../utils/errors.ts";
 import {
   decodeMovieCursor,
@@ -6,6 +7,10 @@ import {
   type MovieCursor,
 } from "./cursor.ts";
 import { moviesRepository } from "./movies.repository.ts";
+
+// LAB: simplified — these logs have no requestId (the service doesn't see `req`).
+// Request-scoped context (AsyncLocalStorage / OpenTelemetry) is roadmap phase P6.
+const logger = rootLogger.child({ component: "movies-service" });
 
 // Extends AppError so errorHandler maps it to 400 (a plain Error became 500).
 export class InvalidMoviesQueryError extends AppError {
@@ -52,7 +57,7 @@ export class MovieService {
       cacheAvailable = false;
       cacheKey = null;
 
-      console.error("Movies cache read failed; using PostgreSQL", error);
+      logger.error({ err: error }, "Movies cache read failed; using PostgreSQL");
     }
 
     const page = await moviesRepository.getMovies(limit, cursor, sort);
@@ -63,7 +68,7 @@ export class MovieService {
         await REDIS.set(page, cacheKey, 60 + jitter);
       } catch (error) {
         // Не робимо успішний GET невдалим через запис у кеш.
-        console.error("Movies cache write failed", error);
+        logger.error({ err: error }, "Movies cache write failed");
       }
     }
 
@@ -82,9 +87,9 @@ export class MovieService {
     try {
       await REDIS.invalidateMoviesList();
     } catch (error) {
-      console.error(
+      logger.error(
+        { movieId: id, err: error },
         "Immediate movies cache invalidation failed; outbox will retry",
-        { movieId: id, error },
       );
     }
 
@@ -103,9 +108,9 @@ export class MovieService {
     try {
       await REDIS.invalidateMoviesList();
     } catch (error) {
-      console.error(
+      logger.error(
+        { movieId: id, err: error },
         "Immediate movies cache invalidation failed; outbox will retry",
-        { movieId: id, error },
       );
     }
 

@@ -10,6 +10,9 @@ import {
   type PgConnectionConfig,
   type PostgresConfig,
 } from "../config/env.ts";
+import { logger as rootLogger } from "./logger.ts";
+
+const logger = rootLogger.child({ component: "postgres" });
 
 type PgRole = "primary" | "replica";
 
@@ -58,18 +61,23 @@ export class PgService {
     this.readPool = new Pool(pgOptionsReplica);
     await this.writePool.query("select 1 + 1");
     await this.readPool.query("select 1 + 1");
-    console.log("[Postgres] connected");
+    logger.info("PostgreSQL connected");
   }
 
   async closeConnection(): Promise<void> {
     if (!this.writePool.ended) {
       await this.writePool.end();
-      console.log("[Postgres] write connection closed");
+      logger.info({ pool: "write" }, "PostgreSQL pool closed");
     }
     if (!this.readPool.ended) {
       await this.readPool.end();
-      console.log("[Postgres] read connection closed");
+      logger.info({ pool: "read" }, "PostgreSQL pool closed");
     }
+  }
+
+  /** Readiness check. Goes through the pool, so pool exhaustion also shows up as "down". */
+  async ping(pool: "write" | "read"): Promise<void> {
+    await (pool === "write" ? this.writePool : this.readPool).query("SELECT 1");
   }
 
   async writeQuery<R extends QueryResultRow = QueryResultRow>(
@@ -107,8 +115,7 @@ export class PgService {
         try {
           await client.query("ROLLBACK");
         } catch (rollbackError) {
-          // Замінити на logger твого проєкту.
-          console.error("PostgreSQL rollback failed", rollbackError);
+          logger.error({ err: rollbackError }, "PostgreSQL rollback failed");
         }
       }
 

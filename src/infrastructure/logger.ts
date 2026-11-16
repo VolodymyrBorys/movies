@@ -1,19 +1,12 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { loadEnvFile } from "node:process";
 import pino from "pino";
+import { config } from "../config/env.ts";
 
-const envFile = join(import.meta.dirname, "../../.env");
-
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
-}
-
+// `.env` is loaded by `node --env-file-if-exists=.env` (npm run dev); see src/config/env.ts.
 export const logger = pino({
-  level: String(process.env.LOG_LEVEL),
+  level: config.log.level,
   base: {
     service: "streaming-api",
-    environment: "dev",
+    environment: config.nodeEnv,
   },
   redact: {
     paths: [

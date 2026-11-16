@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { createClient, RedisClient, type RedisClientOptions } from "redis";
+import { config } from "../config/env.ts";
+import { logger as rootLogger } from "./logger.ts";
 
-const REDIS_URL = "redis://localhost:6379";
+const logger = rootLogger.child({ component: "redis" });
 
 export const REDIS_OPTIONS: RedisClientOptions = {
-  url: REDIS_URL,
-  username: "redis",
+  url: config.redis.url,
+  // Spread instead of `username: undefined` because of exactOptionalPropertyTypes.
+  ...(config.redis.username !== undefined
+    ? { username: config.redis.username }
+    : {}),
+  ...(config.redis.password !== undefined
+    ? { password: config.redis.password }
+    : {}),
   // commandsQueueMaxLength: 1000,
   pingInterval: 30_000,
   commandOptions: {
@@ -37,26 +45,27 @@ class RedisService {
 
   async start(options: RedisClientOptions = REDIS_OPTIONS) {
     this.client = createClient(options);
-    this.client.on("error", (err: any) => {
-      console.error("❌ Redis Client Error:", err);
+    // Emitted on every failed reconnect attempt as well, so expect repeats during an outage.
+    this.client.on("error", (err: unknown) => {
+      logger.error({ err }, "Redis client error");
     });
     this.client.on("connect", () => {
-      console.log("[REDIS] connecting...");
+      logger.info("Redis connecting");
     });
     this.client.on("ready", () => {
-      console.log("[REDIS] ready");
+      logger.info("Redis ready");
     });
     this.client.on("reconnecting", () => {
-      console.log("[REDIS] reconnecting");
+      logger.warn("Redis reconnecting");
     });
 
     this.client.on("end", () => {
-      console.log("[REDIS] connection closed");
+      logger.info("Redis connection closed");
     });
 
     await this.client.connect();
     const pong = await this.client.ping();
-    if (pong === "PONG") console.log("✅ Redis connected");
+    if (pong === "PONG") logger.info("Redis connected");
     else throw new Error("Redis is unavailable");
   }
 
@@ -64,7 +73,13 @@ class RedisService {
     // if (this.subscriber.isOpen) await this.subscriber.quit();
     // if (this.publisher.isOpen) await this.publisher.quit();
     if (this.client.isOpen) await this.client.quit();
-    console.log("🧹 Redis connections closed");
+    logger.info("Redis connections closed");
+  }
+
+  /** Readiness check. With disableOfflineQueue it fails fast while disconnected. */
+  async ping(): Promise<void> {
+    const pong = await this.client.ping();
+    if (pong !== "PONG") throw new Error(`Unexpected PING reply: ${pong}`);
   }
 
   async get(key: string) {

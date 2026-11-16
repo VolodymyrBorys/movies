@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { loadEnvFile } from "node:process";
-import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
+import { config } from "./config/env.ts";
 import { logger } from "./infrastructure/logger.ts";
+import { markShuttingDown } from "./infrastructure/health.ts";
 import { PG } from "./infrastructure/postgres.ts";
 import { REDIS } from "./infrastructure/redis.ts";
 import {
@@ -13,15 +13,9 @@ import {
 // import { pool } from "./infra/db/postgres.ts";
 // import { cpuPool } from "./services/cpu-pool.ts";
 
-/*  */
-
-const envFile = join(import.meta.dirname, "../.env");
-
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
-}
-
-// const { env } = await import("./config/env.ts");
+// `.env` is loaded by `node --env-file-if-exists=.env` (npm run dev), before any import
+// runs; src/config/env.ts validates it. Running `node src/server.ts` directly without
+// --env-file no longer reads .env.
 const { app } = await import("./app.ts");
 const server = createServer(app);
 
@@ -39,7 +33,7 @@ function listen(): Promise<void> {
 
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(process.env.PORT);
+    server.listen(config.server.port);
   });
 }
 
@@ -49,12 +43,10 @@ async function start(): Promise<void> {
   await Promise.all([PG.start(), REDIS.start()]);
   startCacheInvalidationWorker();
   await listen();
-  console.info({
-    event: "server_started",
-    // host: env.HOST,
-    // port: env.PORT,
-    // environment: env.NODE_ENV,
-  });
+  logger.info(
+    { port: config.server.port, environment: config.nodeEnv },
+    "Server started",
+  );
 }
 
 let isShuttingDown = false;
@@ -73,6 +65,19 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
   forceExitTimer.unref();
 
   try {
+    // 0. /readyz → 503, then give the load balancer / Kubernetes endpoints time to stop
+    //    routing new requests here while the server still accepts them.
+    //    The delay counts toward the 15 s force-exit timer (env.ts caps it at 10 s).
+    markShuttingDown();
+
+    if (config.server.shutdownDelayMs > 0) {
+      logger.info(
+        { delayMs: config.server.shutdownDelayMs },
+        "Not ready; waiting before closing HTTP server",
+      );
+      await sleep(config.server.shutdownDelayMs);
+    }
+
     // 1. Перестати приймати нові HTTP-з'єднання.
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {

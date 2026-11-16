@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { PG } from "../infrastructure/postgres.ts";
 import { REDIS } from "../infrastructure/redis.ts";
+import { logger as rootLogger } from "../infrastructure/logger.ts";
+
+const logger = rootLogger.child({ component: "cache-invalidation-worker" });
 
 const workerId = `cache-invalidation-${randomUUID()}`;
 const batchSize = 25;
@@ -98,11 +101,10 @@ async function scheduleRetry(
       [event.id, workerId, message.slice(0, 4_000)],
     );
 
-    console.error("Outbox event moved to dead-letter state", {
-      eventId: event.id,
-      attempts: event.attempts,
-      error: message,
-    });
+    logger.error(
+      { eventId: event.id, attempts: event.attempts, lastError: message },
+      "Outbox event moved to dead-letter state",
+    );
 
     return;
   }
@@ -146,10 +148,10 @@ export async function runCacheInvalidationBatch(): Promise<number> {
       } catch (persistenceError) {
         // Якщо PostgreSQL теж недоступний, lease закінчиться,
         // і подія знову стане доступною для захоплення.
-        console.error("Could not reschedule outbox event", {
-          eventId: event.id,
-          error: persistenceError,
-        });
+        logger.error(
+          { eventId: event.id, err: persistenceError },
+          "Could not reschedule outbox event",
+        );
       }
     }
   }

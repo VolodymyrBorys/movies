@@ -11,11 +11,51 @@ const port = z.coerce.number().int().min(1).max(65_535);
 const positiveInt = z.coerce.number().int().positive();
 const nonEmpty = z.string().min(1);
 
+const LOG_LEVELS = [
+  "fatal",
+  "error",
+  "warn",
+  "info",
+  "debug",
+  "trace",
+  "silent",
+] as const;
+
+// Must stay below the 15 s forced-exit timer in server.ts (delay counts toward it).
+const MAX_SHUTDOWN_DELAY_MS = 10_000;
+
+const redisUrl = z.string().refine(
+  (value) => {
+    try {
+      const { protocol } = new URL(value);
+      return protocol === "redis:" || protocol === "rediss:";
+    } catch {
+      return false;
+    }
+  },
+  { message: "must be a redis:// or rediss:// URL" },
+);
+
 const EnvSchema = z
   .object({
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
+
+    PORT: port.default(3000),
+    LOG_LEVEL: z.enum(LOG_LEVELS).default("info"),
+    // Time between "not ready" and closing the HTTP server, so a load balancer /
+    // Kubernetes endpoints stop routing new requests first. 0 for local runs.
+    SHUTDOWN_DELAY_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_SHUTDOWN_DELAY_MS)
+      .default(0),
+
+    REDIS_URL: redisUrl.default("redis://localhost:6379"),
+    REDIS_USERNAME: nonEmpty.optional(),
+    REDIS_PASSWORD: nonEmpty.optional(),
 
     PG_DATABASE: nonEmpty,
     PG_PRIMARY_HOST: nonEmpty,
@@ -61,6 +101,22 @@ const EnvSchema = z
 
 export type NodeEnv = "development" | "test" | "production";
 export type PgSslMode = "disable" | "verify-full";
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+export interface ServerConfig {
+  readonly port: number;
+  readonly shutdownDelayMs: number;
+}
+
+export interface LogConfig {
+  readonly level: LogLevel;
+}
+
+export interface RedisConfig {
+  readonly url: string;
+  readonly username: string | undefined;
+  readonly password: string | undefined;
+}
 
 export interface PgConnectionConfig {
   readonly host: string;
@@ -82,7 +138,10 @@ export interface PostgresConfig {
 
 export interface AppConfig {
   readonly nodeEnv: NodeEnv;
+  readonly server: ServerConfig;
+  readonly log: LogConfig;
   readonly postgres: PostgresConfig;
+  readonly redis: RedisConfig;
 }
 
 export function loadConfig(source: NodeJS.ProcessEnv): AppConfig {
@@ -110,6 +169,16 @@ export function loadConfig(source: NodeJS.ProcessEnv): AppConfig {
 
   return Object.freeze({
     nodeEnv: env.NODE_ENV,
+    server: Object.freeze({
+      port: env.PORT,
+      shutdownDelayMs: env.SHUTDOWN_DELAY_MS,
+    }),
+    log: Object.freeze({ level: env.LOG_LEVEL }),
+    redis: Object.freeze({
+      url: env.REDIS_URL,
+      username: env.REDIS_USERNAME,
+      password: env.REDIS_PASSWORD,
+    }),
     postgres: Object.freeze({
       database: env.PG_DATABASE,
       primary: Object.freeze({

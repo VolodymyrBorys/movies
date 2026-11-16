@@ -1,4 +1,7 @@
 import { runCacheInvalidationBatch } from "./cache-invalidation.ts";
+import { logger as rootLogger } from "../infrastructure/logger.ts";
+
+const logger = rootLogger.child({ component: "cache-invalidation-worker" });
 
 const pollIntervalMs = 1_000;
 
@@ -18,7 +21,7 @@ async function runLoop(): Promise<void> {
         await sleep(pollIntervalMs);
       }
     } catch (error) {
-      console.error("Cache invalidation batch failed", error);
+      logger.error({ err: error }, "Cache invalidation batch failed");
       await sleep(pollIntervalMs);
     }
   }
