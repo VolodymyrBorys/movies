@@ -2,13 +2,13 @@
 
 General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; this file adds only project-specific facts and rules.
 
-## Current state (verified 2026-11-15)
+## Current state (verified 2026-11-16)
 
 - `app.ts` mounts only `movies` and `metrics` routers under `/v1`. RAG has no HTTP endpoint; it runs only from `scripts/`.
-- Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`), Vitest (no tests, no config).
+- Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`).
+- Vitest (`vitest.config.ts`, `src/**/*.test.ts`): unit tests cover only `src/modules/rag/`. Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
 - Env config: `src/config/env.ts` (Zod, fail-fast) covers PostgreSQL only; `postgres.ts` reads `config.postgres`. `npm run dev` loads `.env` via `--env-file-if-exists`. `server.ts`, `logger.ts`, `qdrant.client.ts`, `gemini.client.ts` and `scripts/` still call `loadEnvFile` and read `process.env` directly.
 - Legacy `src/modules/{ingestion,retrieval,generation}/` are not imported anywhere. Don't delete or merge them without an explicit task.
-- `src/modules/rag/` (except `embedding/`) and several `scripts/` may be uncommitted user work.
 - `describe.md` describes goals/plans; code is the authority on what is implemented.
 
 ## PostgreSQL
@@ -64,7 +64,8 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 ## Verification
 
 - Type check: `npx tsc -p .` (tsconfig has `noEmit`, so it writes nothing).
-- `npm test` is a stub that always fails; there are no lint/typecheck scripts.
+- Tests: `npm test` (`vitest run`, no network). There are no lint/typecheck scripts.
+- In tests, don't return promises through `vi.fn()` when checking unhandled rejections: Vitest spies attach handlers to returned promises and hide them.
 - For small, well-scoped changes, skip the formal plan; plan first only when the change has architectural or data impact.
 
 ## Learning context
