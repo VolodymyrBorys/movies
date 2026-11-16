@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(node:*)",
+      "Bash(npx tsx:*)",
+      "Bash(npm run dev:*)",
+      "Bash(docker compose exec:*)",
+      "Bash(docker exec:*)"
+    ],
+    "deny": [
+      "Edit(**/package-lock.json)"
+    ]
+  }
+}
