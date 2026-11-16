@@ -6,7 +6,9 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 
 - `app.ts` mounts only `movies` and `metrics` routers under `/v1`. RAG has no HTTP endpoint; it runs only from `scripts/`.
 - Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`).
-- Vitest (`vitest.config.ts`, `src/**/*.test.ts`): unit tests cover only `src/modules/rag/`. Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
+- Vitest (`vitest.config.ts`, `src/**/*.test.ts`): unit tests cover `src/modules/rag/` and `src/modules/movies/cursor.ts`; HTTP route tests in `src/routes/movies.test.ts` (supertest; PG/Redis/logger replaced with `vi.mock`; needs local port binding — blocked in the sandbox). Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
+- DB schema lives in `migrations/` (node-pg-migrate, SQL files). Run via `npm run migrate:up|down` (`scripts/migrate.ts`, primary only, `lock_timeout=5s`). Never edit an existing migration; add a new one. Existing local DB: baseline marked applied with `--fake`.
+- `movies.id` is uuid; list pagination is keyset on `(created_at, id)` with a microsecond-precision cursor (`src/modules/movies/cursor.ts`).
 - Env config: `src/config/env.ts` (Zod, fail-fast) covers PostgreSQL only; `postgres.ts` reads `config.postgres`. `npm run dev` loads `.env` via `--env-file-if-exists`. `server.ts`, `logger.ts`, `qdrant.client.ts`, `gemini.client.ts` and `scripts/` still call `loadEnvFile` and read `process.env` directly.
 - Legacy `src/modules/{ingestion,retrieval,generation}/` are not imported anywhere. Don't delete or merge them without an explicit task.
 - `describe.md` describes goals/plans; code is the authority on what is implemented.
@@ -69,9 +71,23 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 - For small, well-scoped changes, skip the formal plan; plan first only when the change has architectural or data impact.
 
 ## Learning context
+
 This is a learning lab for production patterns (PostgreSQL, Redis, outbox, RAG, observability).
+
 - When introducing or changing a mechanism (isolation level, lock, lease, cache versioning, retry policy,
   chunking/embedding params): explain why, alternatives, and failure modes.
 - Prefer proving behavior (test, `EXPLAIN ANALYZE`, load script) over explanation alone.
 - Mark simplifications: `// LAB: simplified — production would also ...`
 - Don't add libraries that hide the mechanism being studied.
+
+## Project vision and learning roadmap
+
+- Long-term project goals and target architecture:
+  `docs/learning-roadmap.md`
+- This is a production-engineering learning lab,
+  not just a Movies API.
+- Develop the system incrementally toward the target architecture.
+- Do not introduce infrastructure, dependencies or services
+  merely because they appear in the roadmap.
+- Every new component must have a practical use case,
+  measurable learning objective and verification strategy.
