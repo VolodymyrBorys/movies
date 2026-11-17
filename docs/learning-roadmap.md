@@ -4,7 +4,7 @@ _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` e
 _Last updated: 2026-11-17 · HEAD `d23b24a` · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
 
-**Current phase: P1 (in progress).** Next task: finish the P1 alert drills and dashboard check (see Phase 1 → Status), then start P2.
+**Current phase: P1 (in progress).** Next task: SLO + burn-rate alert, then the remaining P1 alert drills (see Phase 1 → Status), then start P2.
 
 ---
 
@@ -203,7 +203,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - ✅ Drill "Redis stopped": `RedisDown` fired after 62 s, `CacheErrors` after 300 s, `/readyz` stayed 200 with `redis=down`, no false 5xx alerts.
 - ✅ Finding fixed: `PostgresDown` false positive = exporter pointed at a non-existent DB (`PG_EXPORTER_DATABASE`); resolved after fix.
 - ⏳ Drills not done yet: app stopped (`MoviesApiDown`), Redis stopped + PATCH (`OutboxBacklogTooOld`), PostgreSQL stopped (`PostgresDown` real case), `HighErrorRatio`/`HighLatencyP99` (better with P2 load).
-- ⏳ Grafana dashboard opened by the owner but not yet validated under traffic (`scripts/load-test.ts` + PATCHes).
+- ✅ Grafana dashboard validated under traffic (`scripts/load-test.ts` + PATCHes, owner, 2026-11-17); evictions query and outbox `increase()` panel added afterwards (not yet re-checked).
 - ⏳ Not run: `promtool check config`, `amtool check-config` (commands in the progress doc).
 - ⏳ Not started: SLO + multi-window burn-rate alert; label-cardinality review; replica-lag alert (no replica locally).
 

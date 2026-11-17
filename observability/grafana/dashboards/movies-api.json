@@ -346,13 +346,39 @@
           },
           "expr": "redis_memory_max_bytes",
           "legendFormat": "maxmemory (0 = unlimited)"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(redis_evicted_keys_total[$__rate_interval])",
+          "legendFormat": "evictions / s (right axis)"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "bytes"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -380,8 +406,9 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Outbox events / s by result",
-      "description": "dead_lettered > 0 → alert OutboxDeadLetters.",
+      "title": "Outbox events per interval by result",
+      "description": "Events are rare, so counts per interval (non-overlapping, min 1m) instead of rate(); legend 'Total' = events in the time range. increase() extrapolates, so counts can be fractional. dead_lettered > 0 → alert OutboxDeadLetters.",
+      "interval": "1m",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -399,20 +426,25 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (result) (rate(outbox_events_total[$__rate_interval]))",
+          "expr": "sum by (result) (increase(outbox_events_total[$__interval]))",
           "legendFormat": "{{result}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80
+          }
         },
         "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["sum"]
         },
         "tooltip": {
           "mode": "multi"

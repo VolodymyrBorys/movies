@@ -189,3 +189,11 @@ _(date · drill · fired after · resolved after · notes)_
   After recreating the exporter: `PostgresDown` firing → resolved at 15:40:34.
   Lesson: `pg_up == 0` covers both "PostgreSQL down" and "exporter misconfigured"; always
   cross-check with `/readyz` and exporter logs (runbook step 2).
+- 2026-11-17 · dashboard validation, not a drill · `scripts/load-test.ts` (GET, one URL) +
+  5 PATCHes 10s apart · owner: all panels showed data and matched the expected behaviour
+  (5xx = 0, cache mostly `hit` with `miss` after each PATCH, outbox `processed`, pool
+  `waiting` = 0, all targets up). Follow-up (static review, not yet re-checked in Grafana):
+  "Redis memory / evictions" had no evictions query → added
+  `rate(redis_evicted_keys_total)` on the right axis; outbox events panel switched from
+  `rate()` (rare events looked like ~0) to `increase()` per non-overlapping 1m interval,
+  bars, legend total.
