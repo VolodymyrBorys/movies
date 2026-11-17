@@ -1,7 +1,10 @@
 # Learning Roadmap — Movies Production-Engineering Lab
 
 _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` exit 0, `npm test` 70/70 passed._
+_Last updated: 2026-11-17 · HEAD `aa53302` · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
+
+**Current phase: P1 (in progress).** Next task: finish the P1 alert drills and dashboard check (see Phase 1 → Status), run the integration tests, then start P2.
 
 ---
 
@@ -61,7 +64,8 @@ Target state after all phases. Components marked `*` do **not** exist yet.
    └─────────────┘      └─────────────────────────────────────────┘
 
  Observability plane:
-   Prometheus* + exporters* (postgres, redis, rabbitmq) → Grafana* dashboards, Alertmanager* rules
+   Prometheus + exporters (postgres, redis; rabbitmq*) → Grafana dashboards, Alertmanager rules
+     (local compose in observability/, since 2026-11-17)
    OpenTelemetry SDK* → OTel Collector* → tracing backend* (Jaeger or Tempo, decided in Phase 6)
    pino JSON stdout → log shipper* (Fluent Bit or OTel Collector) → Elasticsearch* → Kibana*
 
@@ -79,7 +83,7 @@ Design constraints for the target:
 
 ## 4. Current implementation status
 
-Verified by reading the code at `19744cd`. "Not verified at runtime" means the conclusion comes from code reading only.
+Originally verified by reading the code at `19744cd`; rows updated through `aa53302` (2026-11-17). "Not verified at runtime" means the conclusion comes from code reading only.
 
 ### 4.1 Implemented
 
@@ -88,14 +92,18 @@ Verified by reading the code at `19744cd`. "Not verified at runtime" means the c
 | Express 5 app, `helmet`, `x-powered-by` disabled, JSON body limit 1 MB, JSON 404, central `errorHandler`                                                                                  | `src/app.ts`, `src/utils/errors.ts`                                   |
 | pino + pino-http, `requestId` (UUID) in logs and `x-request-id` header, header redaction                                                                                                  | `src/app.ts`, `src/infrastructure/logger.ts`                          |
 | PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release | `src/infrastructure/postgres.ts`                                      |
-| Zod fail-fast env config (PostgreSQL only), production requires `PG_SSL=verify-full`                                                                                                      | `src/config/env.ts`                                                   |
-| Keyset (cursor) pagination in repository (`id >/< $cursor`, `limit + 1` for `hasMore`)                                                                                                    | `src/modules/movies/movies.repository.ts`, `cursor.ts`                |
+| Zod fail-fast env config: PostgreSQL, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` (only `PG_*` required); production requires `PG_SSL=verify-full`                                   | `src/config/env.ts`                                                   |
+| Keyset pagination on `(created_at, id)` over `movies` (uuid ids), microsecond-precision opaque cursor, `limit + 1` for `hasMore`                                                         | `src/modules/movies/movies.repository.ts`, `cursor.ts`                |
+| SQL migrations (node-pg-migrate): baseline of `movies` + `cache_invalidation_outbox`; runner on primary with `lock_timeout`, advisory lock, `--fake`/`--dry-run`                         | `migrations/`, `scripts/migrate.ts`                                   |
+| Probes: `/healthz` (liveness, no deps), `/readyz` (503 on shutdown or PG pool failure; Redis reported only)                                                                               | `src/routes/health.ts`, `src/infrastructure/health.ts`                |
 | Redis list cache with version key `movies:list:version`, TTL 60 s + jitter, `SET NX` version init, PG fallback on cache read failure, cache write failure doesn't fail GET                | `src/modules/movies/movies.service.ts`, `src/infrastructure/redis.ts` |
 | Redis client: 1 s command timeout, offline queue disabled, reconnect with exponential backoff + jitter, keepalive, ping                                                                   | `src/infrastructure/redis.ts`                                         |
 | Transactional outbox: mutation + `INSERT cache_invalidation_outbox` in one transaction; best-effort immediate invalidation after commit                                                   | `movies.repository.ts`, `movies.service.ts`                           |
 | Outbox worker: `FOR UPDATE SKIP LOCKED` claim, 30 s lease, owner-checked updates, backoff + jitter (cap 5 min), dead-letter after 20 attempts                                             | `src/workers/cache-invalidation.ts`, `cache-invalidation-runner.ts`   |
-| Graceful shutdown: stop HTTP → stop worker → close PG/Redis; 15 s forced exit; `unhandledRejection` → shutdown                                                                            | `src/server.ts`                                                       |
-| Prometheus: default Node.js metrics, `http_requests_total`, `http_request_duration_seconds` with route template labels; `GET /v1/metrics`                                                 | `src/infrastructure/metrics.ts`, `src/routes/metrics.ts`              |
+| Graceful shutdown: mark not-ready → `SHUTDOWN_DELAY_MS` → stop HTTP → stop worker → close PG/Redis; 15 s forced exit; `unhandledRejection` → shutdown                                   | `src/server.ts`                                                       |
+| App metrics on `GET /v1/metrics`: HTTP RED, `cache_requests_total`, `pg_pool_connections`, `outbox_events_total`, `outbox_batch_duration_seconds`, outbox backlog gauges (worker-sampled, 10 s) | `src/infrastructure/metrics.ts`, `postgres.ts`, `src/workers/`        |
+| Observability stack (local compose): Prometheus, Alertmanager (null receiver), Grafana dashboard, postgres/redis exporters; 11 alert rules + promtool tests; runbooks | `observability/`, `docs/progress/observability.md`                    |
+| Alert drill watcher (read-only): Prometheus alert transitions + `/readyz`                                                                                                                 | `scripts/watch-alerts.ts`                                             |
 | RAG pipeline (embed → Qdrant search → bounded context → Gemini generate), cancellation, retry only in generation, 70 unit tests                                                           | `src/modules/rag/`, see `docs/progress/rag.md`                        |
 | Hand-written HTTP load test (concurrency, p50/p95/p99, status counts)                                                                                                                     | `scripts/load-test.ts`                                                |
 
@@ -103,14 +111,18 @@ Verified by reading the code at `19744cd`. "Not verified at runtime" means the c
 
 | Gap                                                                                                      | Evidence                                                                                                                                                                                                                           | Impact                                                                                     |
 | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (uncommitted) | Query validation wired, cursor is keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. HTTP tests in `src/routes/movies.test.ts` need local port binding (blocked in the sandbox) — run them outside it. | Not yet verified against a real DB (integration test still missing).                       |
+| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (`5f555c0`)   | Query validation wired, keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. `src/routes/movies.test.ts` passed when run by the owner on 2026-11-16 (supertest needs local port binding — blocked in the assistant sandbox). | Real-DB check is in the integration tests, which have not been run yet (see next row).     |
+| Integration tests written but **never run**                                                              | `npm run test:integration` (`src/**/*.int.test.ts`, `src/test/`): keyset boundaries, cache staleness, outbox atomicity, worker SKIP LOCKED/retry/dead-letter/lease, `/readyz`. Needs `createdb movies_test` + Redis db 15. | First run may expose test bugs; until then SQL vs schema is proven only by manual use.     |
+| Probe HTTP tests not confirmed                                                                           | `src/routes/health.test.ts` (supertest) not reported as run; `/healthz`, `/readyz` confirmed working manually by the owner.                                                                                                       | Run `npm test` outside the sandbox.                                                        |
 | `movies.status` / `movies.version` are nullable                                                          | Baseline migration mirrors the DB as is; `version + 1` on NULL stays NULL.                                                                                                                                                         | Tighten with a later migration (P3, together with optimistic concurrency).                 |
 | DELETE and CREATE not exposed                                                                            | `deleteMovie` exists in controller/service/repository but has no route; `validation/create-movie.ts` has no route or repository method.                                                                                            | Write path only via `PATCH`.                                                               |
 | Optimistic concurrency is half-done                                                                      | `version = version + 1` on update, but no `WHERE version = $expected` / `If-Match`.                                                                                                                                                | Lost updates are possible; good Phase 3 exercise.                                          |
 | Config centralization (RAG only)                                                                         | PG, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` are in `env.ts` (2026-11-16). Qdrant/Gemini clients and RAG scripts still call `loadEnvFile` and read `process.env`; `QDRANT_URL!` unvalidated.                             | RAG cannot be configured the same way as the API.                                          |
 | Logging consistency (RAG only)                                                                           | Non-RAG code uses the pino logger (2026-11-16). `console.*` remains in RAG generation/collection services. Service-level logs have no `requestId` (no request context).                                                          | RAG logs are unstructured; correlation needs P6.                                           |
 | Error model                                                                                              | `AppError` exists; movies service has its own `InvalidMoviesQueryError`; RAG uses plain `Error`.                                                                                                                                   | Inconsistent HTTP mapping.                                                                 |
-| Metrics coverage                                                                                         | 2026-11-17: added `cache_requests_total`, `pg_pool_connections`, `outbox_events_total`, `outbox_batch_duration_seconds`, outbox backlog gauges; `service` label → `movies-api`. Still missing: RAG stage metrics, server-side exporters, Prometheus/Grafana. | Can expose, not yet scrape/alert.                                                          |
+| Metrics / alerting coverage                                                                              | App metrics, exporters, Prometheus, Grafana and 11 alert rules exist (2026-11-17). Missing: RAG stage metrics, replica-lag alert (no replica locally), SLO burn-rate alert, real Alertmanager receivers. Node default metrics have a double prefix (`nodejs_nodejs_*`, registered with `prefix: "nodejs_"`). | See Phase 1 → Status.                                                                      |
+| `/v1/metrics` unauthenticated, same port as the API                                                      | Mounted in `src/app.ts` under `/v1`.                                                                                                                                                                                               | Fine locally (ports bound to 127.0.0.1); must be restricted before any exposure (P9/P10).  |
+| App `.env.example` may lack new variables                                                                | `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS`, `REDIS_URL`, `REDIS_USERNAME`, `REDIS_PASSWORD` were proposed for it; the assistant cannot read `.env*`, so it is unconfirmed.                                                         | New clones may miss settings; owner to check.                                              |
 | Worker runs inside the API process                                                                       | `startCacheInvalidationWorker()` in `server.ts`.                                                                                                                                                                                   | Cannot scale/deploy API and worker independently.                                          |
 | Installed but unused                                                                                     | OpenTelemetry packages (never initialized), `piscina` (commented out), `supertest`, `autocannon`, `src/utils/retry.ts` (not imported).                                                                                             | Dependencies without a use case yet.                                                       |
 | RAG                                                                                                      | No HTTP endpoint; successful generation never observed (Gemini 503); open issues list in `docs/progress/rag.md`.                                                                                                                   | —                                                                                          |
@@ -118,12 +130,12 @@ Verified by reading the code at `19744cd`. "Not verified at runtime" means the c
 
 ### 4.3 Missing
 
-- ~~DB schema / migrations in the repo~~ — **added 2026-11-16**: `node-pg-migrate`, `migrations/1794853976336_baseline.sql` (`movies`, `cache_invalidation_outbox`), `scripts/migrate.ts`, `npm run migrate:{up,down,create}`. Not yet run against a DB from this session.
-- **Local infrastructure definition** (e.g. `docker-compose.yml`) and a `Dockerfile`.
+- ~~DB schema / migrations in the repo~~ — **added 2026-11-16**: `node-pg-migrate`, `migrations/1794853976336_baseline.sql` (`movies`, `cache_invalidation_outbox`), `scripts/migrate.ts`, `npm run migrate:{up,down,create}`. Owner ran `--dry-run`/`--fake` on the local DB and up → down → up on a disposable DB (2026-11-16): OK.
+- **Local infrastructure definition for app dependencies** (PostgreSQL primary + replica, Redis, Qdrant) and a `Dockerfile`. Deferred by the owner; PG/Redis run on the host. Only the observability stack has a compose file.
 - ~~Health/readiness endpoints~~ — **added 2026-11-16**: `/healthz`, `/readyz` (`src/routes/health.ts`, `src/infrastructure/health.ts`).
-- **Integration tests** (real PostgreSQL/Redis). HTTP-level tests with mocked PG/Redis exist (`src/routes/*.test.ts`).
+- ~~Integration tests~~ — **written 2026-11-17, not yet run** (see 4.2).
 - RabbitMQ (no code, no dependency).
-- Prometheus server config, Grafana dashboards, alert rules, exporters.
+- ~~Prometheus server config, Grafana dashboards, alert rules, exporters~~ — **added 2026-11-17** (`observability/`); verification partly done (Phase 1 → Status).
 - Distributed tracing; Elasticsearch/Kibana.
 - k6 (or equivalent) scenarios.
 - AI agent, tool calling, MCP, agent evals.
@@ -151,7 +163,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ---
 
-### Phase 0 — Foundation and reproducibility (**next**)
+### Phase 0 — Foundation and reproducibility (**mostly done**; remaining: run integration tests, optional compose for app deps, optional CI)
 
 **Why.** Every later phase needs a reproducible environment, a working read path and a way to know if the process is healthy. Load-testing a 500, or writing K8s probes without health endpoints, teaches nothing.
 
@@ -160,12 +172,14 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Scope.**
 
 1. ✅ Fix `GET /v1/movies` validation and align code with the DB schema + HTTP-level regression tests.
-2. ✅ Schema in the repo as versioned SQL migrations (`node-pg-migrate`, up + down). Remaining: run up → down → up on a disposable DB.
-3. Local infrastructure definition: PostgreSQL primary + streaming replica, Redis, Qdrant (compose file → approval).
+2. ✅ Schema in the repo as versioned SQL migrations (`node-pg-migrate`, up + down); up → down → up verified by the owner on a disposable DB.
+3. ⏸ Local infrastructure definition: PostgreSQL primary + streaming replica, Redis, Qdrant (compose file → approval). Deferred by the owner (2026-11-16); PG/Redis run on the host.
 4. ✅ `GET /healthz` (liveness: process alive, no dependency checks) and `GET /readyz` (readiness: not shutting down, PostgreSQL write/read pools respond; Redis is reported but never fails readiness — cache with PG fallback). Shutdown: not-ready → `SHUTDOWN_DELAY_MS` → close.
 5. ✅ Config: Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` in `env.ts` with defaults, so only `PG_*` stay required (no sectioning needed). RAG clients are still outside `env.ts`.
 6. ✅ Replace `console.*` with the project logger in non-RAG infrastructure code.
 7. Optional: CI with `npx tsc -p .` + `npm test` (CI change → approval).
+8. ⏳ Integration tests against real PG/Redis: written (`npm run test:integration`), **not yet run**.
+9. ⏳ `EXPLAIN (ANALYZE, BUFFERS)` for the second-page keyset query (expect `Index Scan using movies_created_at_id_idx`); not yet run.
 
 **Exercises.**
 
@@ -179,7 +193,19 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ---
 
-### Phase 1 — Metrics, dashboards and alerting
+### Phase 1 — Metrics, dashboards and alerting (**in progress — current phase**)
+
+**Status (2026-11-17).** Details, runbooks and drill log: `docs/progress/observability.md`.
+
+- ✅ App metrics (cache, PG pool, outbox counters/histogram/backlog gauges + refresh timestamp); labelled counters pre-created at 0 so `increase()` sees the first event; `service` label `movies-api`.
+- ✅ Compose stack (`observability/`), all 4 scrape targets UP (owner, 2026-11-17).
+- ✅ 11 alert rules with severity + runbook; `promtool test rules` → SUCCESS (owner, 2026-11-17).
+- ✅ Drill "Redis stopped": `RedisDown` fired after 62 s, `CacheErrors` after 300 s, `/readyz` stayed 200 with `redis=down`, no false 5xx alerts.
+- ✅ Finding fixed: `PostgresDown` false positive = exporter pointed at a non-existent DB (`PG_EXPORTER_DATABASE`); resolved after fix.
+- ⏳ Drills not done yet: app stopped (`MoviesApiDown`), Redis stopped + PATCH (`OutboxBacklogTooOld`), PostgreSQL stopped (`PostgresDown` real case), `HighErrorRatio`/`HighLatencyP99` (better with P2 load).
+- ⏳ Grafana dashboard opened by the owner but not yet validated under traffic (`scripts/load-test.ts` + PATCHes).
+- ⏳ Not run: `promtool check config`, `amtool check-config` (commands in the progress doc).
+- ⏳ Not started: SLO + multi-window burn-rate alert; label-cardinality review; replica-lag alert (no replica locally).
 
 **Why Prometheus/Grafana.** Metrics are cheap, aggregatable time series — the right tool to answer "is it healthy and how fast" and to fire alerts. Without them, Phases 2–5 have no way to show cause and effect.
 
@@ -451,14 +477,15 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | Level              | Tooling                                        | What it proves                                  | Introduced        |
 | ------------------ | ---------------------------------------------- | ----------------------------------------------- | ----------------- |
 | Typecheck          | `npx tsc -p .`                                 | Types/contracts compile under strict settings   | exists            |
-| Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists (RAG only) |
-| HTTP / integration | Vitest + `supertest` + real PG/Redis           | Wiring, validation, transactions, outbox, cache | P0                |
-| Migration          | up → down → up on a real DB                    | Rollback path exists                            | P0                |
+| Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists: RAG, cursor, config, readiness, metrics (124 tests, 2026-11-17) |
+| HTTP (mocked deps) | Vitest + `supertest`, PG/Redis mocked          | Routing, validation, controller → repository    | exists (`src/routes/*.test.ts`; needs local port) |
+| Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | written, not yet run |
+| Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16) |
 | Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
 | Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
 | Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | P3                |
 | Messaging          | real broker, kill/crash drills                 | At-least-once, idempotency, DLQ                 | P5                |
-| Observability      | `promtool test rules`, manual alert drills     | Alerts fire and resolve                         | P1, P6            |
+| Observability      | `promtool test rules`, drills via `scripts/watch-alerts.ts` | Alerts fire and resolve           | P1 (rule tests pass; 1 of ~5 drills done), P6 |
 | AI evals           | golden sets, fixtures, live runs               | Retrieval/agent quality over time               | P7, P8            |
 | Infra              | `terraform validate/plan`, manifest validation | Infra changes reviewed before apply             | P9–P11            |
 

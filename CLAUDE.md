@@ -2,11 +2,15 @@
 
 General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; this file adds only project-specific facts and rules.
 
-## Current state (verified 2026-11-16)
+## Current state (verified 2026-11-17)
 
-- `app.ts` mounts only `movies` and `metrics` routers under `/v1`. RAG has no HTTP endpoint; it runs only from `scripts/`.
+- `app.ts` mounts `movies` and `metrics` routers under `/v1`, probes (`/healthz`, `/readyz`) at the root. RAG has no HTTP endpoint; it runs only from `scripts/`.
 - Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`).
-- Vitest (`vitest.config.ts`, `src/**/*.test.ts`): unit tests cover `src/modules/rag/` and `src/modules/movies/cursor.ts`; HTTP route tests in `src/routes/movies.test.ts` (supertest; PG/Redis/logger replaced with `vi.mock`; needs local port binding — blocked in the sandbox). Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
+- Vitest (`vitest.config.ts`, `src/**/*.test.ts`, excludes `*.int.test.ts`): unit tests cover RAG, movies cursor/service, config, readiness, metrics, outbox worker metrics. HTTP route tests `src/routes/*.test.ts` (supertest; PG/Redis/logger replaced with `vi.mock`; need local port binding — blocked in the sandbox, so the owner runs them). Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
+- Integration tests: `npm run test:integration` (`vitest.integration.config.ts`, `src/**/*.int.test.ts`, helpers in `src/test/`), real PG/Redis; DB name must end with `_test` (default `movies_test`, must exist), Redis forced to db 15. Written, **not yet run**.
+- Metrics (`src/infrastructure/metrics.ts`, label `service="movies-api"`): HTTP RED, `cache_requests_total`, `pg_pool_connections`, `outbox_*` (backlog gauges sampled by the worker every 10 s). Labelled counters are pre-created at 0 — keep that when adding label values.
+- Observability (P1): `observability/compose.yml` (Prometheus :9090, Alertmanager :9093 with null receiver, Grafana :3001, postgres/redis exporters; app/PG/Redis run on the host). Always `docker compose -f observability/compose.yml --env-file observability/.env`. Alert rules + promtool tests in `observability/prometheus/`; runbooks and drill log in `docs/progress/observability.md`; drill watcher `node scripts/watch-alerts.ts`.
+- Session history and next steps: `docs/session-log.md`.
 - DB schema lives in `migrations/` (node-pg-migrate, SQL files). Run via `npm run migrate:up|down` (`scripts/migrate.ts`, primary only, `lock_timeout=5s`). Never edit an existing migration; add a new one. Existing local DB: baseline marked applied with `--fake`.
 - `movies.id` is uuid; list pagination is keyset on `(created_at, id)` with a microsecond-precision cursor (`src/modules/movies/cursor.ts`).
 - Env config: `src/config/env.ts` (Zod, fail-fast) covers PostgreSQL, Redis (`REDIS_URL`, optional `REDIS_USERNAME`/`REDIS_PASSWORD`), `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS`; only `PG_*` are required. `.env` is loaded only via `node --env-file-if-exists` (`npm run dev`, `migrate:*`). `qdrant.client.ts`, `gemini.client.ts` and RAG `scripts/` still call `loadEnvFile` and read `process.env` directly.
@@ -67,7 +71,7 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 ## Verification
 
 - Type check: `npx tsc -p .` (tsconfig has `noEmit`, so it writes nothing).
-- Tests: `npm test` (`vitest run`, no network). There are no lint/typecheck scripts.
+- Tests: `npm test` (`vitest run`, no network). Integration: `npm run test:integration` (real PG/Redis). Alert rules: `promtool test rules` (command in `docs/progress/observability.md`). There are no lint/typecheck scripts.
 - In tests, don't return promises through `vi.fn()` when checking unhandled rejections: Vitest spies attach handlers to returned promises and hide them.
 - For small, well-scoped changes, skip the formal plan; plan first only when the change has architectural or data impact.
 
