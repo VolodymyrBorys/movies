@@ -148,7 +148,11 @@ An event reached 20 attempts and will not be retried; that invalidation is lost.
 
 `postgres_exporter` cannot connect (`pg_up == 0`).
 1. Is PostgreSQL running? `pg_isready`.
-2. If PostgreSQL is fine: exporter credentials (`observability/.env`), `pg_hba.conf` allowing the Docker host connection, role `movies_monitor` exists.
+2. If PostgreSQL is fine (`/readyz` shows `postgres_*=up`): it's the exporter. Read
+   `obs logs --tail=30 postgres-exporter`: `database "…" does not exist` → wrong
+   `PG_EXPORTER_DATABASE`; `password authentication failed` → password/role;
+   `no pg_hba.conf entry` → allow the Docker host address. After editing
+   `observability/.env`, recreate: `obs up -d postgres-exporter`.
 3. App impact: `/readyz` → 503, writes fail.
 
 ### RedisDown
@@ -168,3 +172,20 @@ Prometheus cannot scrape an exporter container; `pg_up`/`redis_up` disappear ins
 ## Drill log
 
 _(date · drill · fired after · resolved after · notes)_
+
+- 2026-11-17 · Redis stopped (`brew services stop redis`, GET every 10s, ~7 min) ·
+  `RedisDown` pending 15:28:17 → firing after 62s → resolved 20s after Redis was back;
+  `CacheErrors` firing after 300s (`for: 5m`), resolves only after the 5m `rate()` window
+  drains (~5 min after recovery) · `/readyz` stayed 200 with `redis=down` the whole time;
+  no `HighErrorRatio`/`MoviesApiDown` → readiness design confirmed (Redis never fails it).
+  End-to-end detection: Redis down ~15:28:04 → firing 15:29:19 (~75s = scrape 15s +
+  eval 15s + `for: 1m`).
+- 2026-11-17 · finding, not a drill · `PostgresDown` firing since 14:21:17 while `/readyz`
+  showed both PG pools up → `pg_up == 0` means the **exporter** cannot connect (auth/DB
+  name/pg_hba), not that PostgreSQL is down. Exporter log: `pq: database "movies" does not
+  exist` — `PG_EXPORTER_DATABASE` defaulted to a guessed name in `env.example`. Network,
+  pg_hba and the `movies_monitor` password were fine ("Established new database
+  connection"). Fix: use the app's `PG_DATABASE`; template no longer has a default.
+  After recreating the exporter: `PostgresDown` firing → resolved at 15:40:34.
+  Lesson: `pg_up == 0` covers both "PostgreSQL down" and "exporter misconfigured"; always
+  cross-check with `/readyz` and exporter logs (runbook step 2).
