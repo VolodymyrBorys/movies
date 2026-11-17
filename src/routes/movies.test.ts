@@ -32,6 +32,8 @@ const { app } = await import("../app.ts");
 const { PG } = await import("../infrastructure/postgres.ts");
 const { REDIS } = await import("../infrastructure/redis.ts");
 const { encodeMovieCursor } = await import("../modules/movies/cursor.ts");
+const { metricsRegistry } = await import("../infrastructure/metrics.ts");
+const { metricValue } = await import("../test/metric-value.ts");
 
 const readQuery = vi.mocked(PG.readQuery);
 const transaction = vi.mocked(PG.transaction);
@@ -252,4 +254,45 @@ describe("PATCH /v1/movies/:id", () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(invalidate).not.toHaveBeenCalled();
   });
+});
+
+describe("HTTP metrics route label", () => {
+  // Express matches paths case-insensitively and req.baseUrl keeps the client's casing.
+  // Regression: `/V1/movies` must be counted as route="/v1/movies", otherwise SLO rules and
+  // alerts filtering on route="/v1/movies" miss that traffic.
+  function requestsTotal(labels: Record<string, string>) {
+    const metric = metricsRegistry.getSingleMetric("http_requests_total");
+    if (!metric) throw new Error("http_requests_total is not registered");
+    return metricValue(metric, labels);
+  }
+
+  it.each([
+    ["GET", "/V1/movies", "/v1/movies", "200"],
+    ["PATCH", `/V1/Movies/${ID1}`, "/v1/movies/:id", "404"],
+  ] as const)(
+    "%s %s is labelled with the lower-case route template",
+    async (method, url, expectedRoute, status) => {
+      fakeTransactionNotFound();
+      const before = await requestsTotal({ method, route: expectedRoute, status_code: status });
+
+      const res =
+        method === "GET"
+          ? await request(app).get(url)
+          : await request(app).patch(url).send({ status: "published" });
+
+      expect(String(res.status)).toBe(status);
+      expect(
+        await requestsTotal({ method, route: expectedRoute, status_code: status }),
+      ).toBe(before + 1);
+      expect(
+        await requestsTotal({ method, route: expectedRoute.replace("/v1", "/V1"), status_code: status }),
+      ).toBe(0);
+    },
+  );
+
+  function fakeTransactionNotFound() {
+    transaction.mockImplementation(async (callback) =>
+      callback({ query: vi.fn(async () => ({ rows: [] })) } as never),
+    );
+  }
 });

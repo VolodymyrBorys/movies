@@ -93,6 +93,41 @@ Record outcomes (time to fire, time to resolve, surprises) at the bottom of this
   guesses until P2. `HighErrorRatio`/`HighLatencyP99` overlap with the SLO alerts; kept for
   comparison, decide after drills.
 
+## Label cardinality review (2026-11-17)
+
+Goal: no IDs, raw URLs or unbounded user input as label values.
+
+| Metric(s) | Labels | Values | Bounded |
+|---|---|---|---|
+| all app metrics | `service` | constant `movies-api` | yes |
+| `cache_requests_total` | `cache`, `result` | code enums (`hit/miss/error`) | yes |
+| `outbox_events_total` | `result` | code enum | yes |
+| `pg_pool_connections` | `pool`, `state` | `write/read` × `total/idle/waiting` | yes |
+| `http_requests_total`, `http_request_duration_seconds` | `method`, `route`, `status_code` | route **template** (`/v1/movies/:id`), else `unmatched` | yes, see below |
+| `redis_exporter` | per-db, per-command | no `check-keys` configured → no per-key series | yes |
+| `postgres_exporter` | `datname`, `state`, … | `application_name` is client-set (today only `movies-*`) | yes in practice; to confirm live |
+
+Findings:
+- **Fixed:** `route` used `req.baseUrl` as sent by the client. Express routing is
+  case-insensitive, so `GET /V1/movies` was served but labelled `route="/V1/movies"` —
+  invisible to the SLO rules, `HighLatencyP99` and dashboard panels that filter on
+  `route="/v1/movies"`. Reproduced with the project's Express 5.3.0 (no network);
+  fix: `req.baseUrl.toLowerCase()` (all mount paths are lower-case, no params).
+  Regression tests in `src/routes/movies.test.ts` ("HTTP metrics route label"), passed (owner).
+- **Accepted:** `route="unmatched"` keeps any HTTP method the Node parser accepts (fixed list
+  of a few dozen) × 404/400/413 → worst case estimated at ~1–2k histogram series (estimate,
+  not measured). Collapse `method` to `other` for unmatched routes if it ever matters.
+- Double slashes (`/v1//movies`) and unknown sub-paths (`/v1/movies/123` for GET) → `unmatched`.
+
+Live check (Prometheus) — **not run yet**:
+```promql
+topk(15, count by (__name__) ({__name__=~".+"}))
+count by (job) ({__name__=~".+"})
+count by (route, method) (http_requests_total)
+group by (application_name, usename) (pg_stat_activity_count)
+```
+plus Status → TSDB Status ("Top 10 label names with high value count").
+
 ## SLOs and burn-rate alerts
 
 Rules: `observability/prometheus/rules/slo.rules.yml` (table of SLOs, windows and burn rates

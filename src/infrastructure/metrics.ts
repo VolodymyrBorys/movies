@@ -123,7 +123,13 @@ export function metricsMiddleware(
     const elapsedSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
 
     // Використовуємо шаблон маршруту, а не URL із конкретними ID.
-    const route = req.route ? `${req.baseUrl}${req.route.path}` : "unmatched";
+    // req.baseUrl — це частина URL клієнта як є, а Express матчить без урахування регістру:
+    // `/V1/movies` дав би окремий route="/V1/movies", невидимий для SLO/alerts, що фільтрують
+    // route="/v1/movies". Усі mount paths у нижньому регістрі й без параметрів, тож
+    // нормалізація нічого не губить. route.path — це шаблон із коду, його не чіпаємо.
+    const route = req.route
+      ? `${req.baseUrl.toLowerCase()}${req.route.path}`
+      : "unmatched";
 
     const labels = {
       method: req.method,
