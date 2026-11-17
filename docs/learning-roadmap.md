@@ -204,7 +204,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - ✅ Finding fixed: `PostgresDown` false positive = exporter pointed at a non-existent DB (`PG_EXPORTER_DATABASE`); resolved after fix.
 - ⏳ Drills not done yet: app stopped (`MoviesApiDown`), Redis stopped + PATCH (`OutboxBacklogTooOld`), PostgreSQL stopped (`PostgresDown` real case), `HighErrorRatio`/`HighLatencyP99` (better with P2 load).
 - ✅ Grafana dashboard validated under traffic (`scripts/load-test.ts` + PATCHes, owner, 2026-11-17); evictions query and outbox `increase()` panel added afterwards (not yet re-checked).
-- ⏳ Not run: `promtool check config`, `amtool check-config` (commands in the progress doc).
+- ✅ `promtool check config` SUCCESS (assistant, local promtool 3.15.0; rule-file glob is a container path, rules checked separately) and `amtool check-config` SUCCESS (owner, `prom/alertmanager:v0.28.1`: global, route, 1 receiver), 2026-11-17.
 - ✅ SLOs for `GET /v1/movies` (availability 99.5%, latency 99% ≤ 250 ms, 30d) with multi-window burn-rate alerts (fast 14.4×/6×, slow 1×), recording rules, traffic guards; `promtool check rules` + `test rules` SUCCESS (assistant, local promtool 3.15.0, 2026-11-17). Not yet observed firing live.
 - ✅ Label-cardinality review by code (2026-11-17): all labels bounded; fixed `route` taking the client's casing from `req.baseUrl` (`/V1/movies` escaped SLO/alerts), regression tests passed (owner). Live check (owner): 2437 series total, app labels clean; client-set `application_name` in postgres_exporter (pgAdmin includes connection IDs) noted and accepted.
 - ⏳ Not started: replica-lag alert (no replica locally).
