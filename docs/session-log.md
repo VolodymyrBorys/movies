@@ -5,6 +5,25 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-17 (session 2) · Integration tests run
+
+### Worked on / completed
+- First run of `npm run test:integration` (owner): initially failed with `database "movies_test" does not exist` (expected — tests never create DBs); after `createdb movies_test` → **14/14 passed** (`src/routes/movies.int.test.ts` 9, `src/workers/cache-invalidation.int.test.ts` 5). Migrations applied by globalSetup.
+- `npm test` (owner): all passed, incl. `src/routes/health.test.ts` (first run).
+- Roadmap §4.2/§4.3/§6, P0 step 8 and CLAUDE.md "Current state" updated accordingly.
+
+### Notes
+- Previous session's next step 4 (CLAUDE.md "Current state") was already done in `d23b24a`.
+- No mutation check was done to prove the integration tests can fail (owner decision).
+
+### Next steps (in order)
+1. Finish P1 drills with `node scripts/watch-alerts.ts` (app stopped; Redis stopped + PATCH; PostgreSQL stopped) → Drill log in `docs/progress/observability.md`.
+2. Validate the Grafana dashboard under `scripts/load-test.ts` + PATCHes.
+3. `promtool check config`, `amtool check-config`; `EXPLAIN (ANALYZE, BUFFERS)` of the second-page keyset query.
+4. Start P2.
+
+---
+
 ## 2026-11-16 – 2026-11-17 · Roadmap, P0 foundation, P1 observability
 
 Commits `7f7bad8` … `aa53302` on `master` (pushed by the owner).

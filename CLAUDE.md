@@ -2,12 +2,12 @@
 
 General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; this file adds only project-specific facts and rules.
 
-## Current state (verified 2026-11-17)
+## Current state (verified 2026-11-17, integration tests run)
 
 - `app.ts` mounts `movies` and `metrics` routers under `/v1`, probes (`/healthz`, `/readyz`) at the root. RAG has no HTTP endpoint; it runs only from `scripts/`.
 - Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`).
 - Vitest (`vitest.config.ts`, `src/**/*.test.ts`, excludes `*.int.test.ts`): unit tests cover RAG, movies cursor/service, config, readiness, metrics, outbox worker metrics. HTTP route tests `src/routes/*.test.ts` (supertest; PG/Redis/logger replaced with `vi.mock`; need local port binding — blocked in the sandbox, so the owner runs them). Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.
-- Integration tests: `npm run test:integration` (`vitest.integration.config.ts`, `src/**/*.int.test.ts`, helpers in `src/test/`), real PG/Redis; DB name must end with `_test` (default `movies_test`, must exist), Redis forced to db 15. Written, **not yet run**.
+- Integration tests: `npm run test:integration` (`vitest.integration.config.ts`, `src/**/*.int.test.ts`, helpers in `src/test/`), real PG/Redis; DB name must end with `_test` (default `movies_test`, must exist; globalSetup applies migrations), Redis forced to db 15. 14/14 passed (owner, 2026-11-17); the owner runs them (sandbox can't reach local ports).
 - Metrics (`src/infrastructure/metrics.ts`, label `service="movies-api"`): HTTP RED, `cache_requests_total`, `pg_pool_connections`, `outbox_*` (backlog gauges sampled by the worker every 10 s). Labelled counters are pre-created at 0 — keep that when adding label values.
 - Observability (P1): `observability/compose.yml` (Prometheus :9090, Alertmanager :9093 with null receiver, Grafana :3001, postgres/redis exporters; app/PG/Redis run on the host). Always `docker compose -f observability/compose.yml --env-file observability/.env`. Alert rules + promtool tests in `observability/prometheus/`; runbooks and drill log in `docs/progress/observability.md`; drill watcher `node scripts/watch-alerts.ts`.
 - Session history and next steps: `docs/session-log.md`.

@@ -1,10 +1,10 @@
 # Learning Roadmap — Movies Production-Engineering Lab
 
 _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` exit 0, `npm test` 70/70 passed._
-_Last updated: 2026-11-17 · HEAD `aa53302` · Session notes: `docs/session-log.md`._
+_Last updated: 2026-11-17 · HEAD `d23b24a` · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
 
-**Current phase: P1 (in progress).** Next task: finish the P1 alert drills and dashboard check (see Phase 1 → Status), run the integration tests, then start P2.
+**Current phase: P1 (in progress).** Next task: finish the P1 alert drills and dashboard check (see Phase 1 → Status), then start P2.
 
 ---
 
@@ -111,9 +111,9 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 
 | Gap                                                                                                      | Evidence                                                                                                                                                                                                                           | Impact                                                                                     |
 | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (`5f555c0`)   | Query validation wired, keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. `src/routes/movies.test.ts` passed when run by the owner on 2026-11-16 (supertest needs local port binding — blocked in the assistant sandbox). | Real-DB check is in the integration tests, which have not been run yet (see next row).     |
-| Integration tests written but **never run**                                                              | `npm run test:integration` (`src/**/*.int.test.ts`, `src/test/`): keyset boundaries, cache staleness, outbox atomicity, worker SKIP LOCKED/retry/dead-letter/lease, `/readyz`. Needs `createdb movies_test` + Redis db 15. | First run may expose test bugs; until then SQL vs schema is proven only by manual use.     |
-| Probe HTTP tests not confirmed                                                                           | `src/routes/health.test.ts` (supertest) not reported as run; `/healthz`, `/readyz` confirmed working manually by the owner.                                                                                                       | Run `npm test` outside the sandbox.                                                        |
+| ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (`5f555c0`)   | Query validation wired, keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. `src/routes/movies.test.ts` passed when run by the owner on 2026-11-16 (supertest needs local port binding — blocked in the assistant sandbox). | Real-DB check: integration tests passed (owner, 2026-11-17).                               |
+| ~~Integration tests written but never run~~ — **passed 14/14 on first run (owner, 2026-11-17)**          | `npm run test:integration` (`src/**/*.int.test.ts`, `src/test/`): keyset boundaries, cache staleness, outbox atomicity, worker SKIP LOCKED/retry/dead-letter/lease, `/readyz`. Needs `createdb movies_test` (migrations applied by globalSetup) + Redis db 15. | No mutation check was done for these tests (owner decision).                               |
+| ~~Probe HTTP tests not confirmed~~ — **`npm test` passed in full (owner, 2026-11-17)**, incl. `src/routes/health.test.ts` | —                                                                                                                                                                                                                                  | —                                                                                          |
 | `movies.status` / `movies.version` are nullable                                                          | Baseline migration mirrors the DB as is; `version + 1` on NULL stays NULL.                                                                                                                                                         | Tighten with a later migration (P3, together with optimistic concurrency).                 |
 | DELETE and CREATE not exposed                                                                            | `deleteMovie` exists in controller/service/repository but has no route; `validation/create-movie.ts` has no route or repository method.                                                                                            | Write path only via `PATCH`.                                                               |
 | Optimistic concurrency is half-done                                                                      | `version = version + 1` on update, but no `WHERE version = $expected` / `If-Match`.                                                                                                                                                | Lost updates are possible; good Phase 3 exercise.                                          |
@@ -133,7 +133,7 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 - ~~DB schema / migrations in the repo~~ — **added 2026-11-16**: `node-pg-migrate`, `migrations/1794853976336_baseline.sql` (`movies`, `cache_invalidation_outbox`), `scripts/migrate.ts`, `npm run migrate:{up,down,create}`. Owner ran `--dry-run`/`--fake` on the local DB and up → down → up on a disposable DB (2026-11-16): OK.
 - **Local infrastructure definition for app dependencies** (PostgreSQL primary + replica, Redis, Qdrant) and a `Dockerfile`. Deferred by the owner; PG/Redis run on the host. Only the observability stack has a compose file.
 - ~~Health/readiness endpoints~~ — **added 2026-11-16**: `/healthz`, `/readyz` (`src/routes/health.ts`, `src/infrastructure/health.ts`).
-- ~~Integration tests~~ — **written 2026-11-17, not yet run** (see 4.2).
+- ~~Integration tests~~ — **written and passed 2026-11-17** (see 4.2).
 - RabbitMQ (no code, no dependency).
 - ~~Prometheus server config, Grafana dashboards, alert rules, exporters~~ — **added 2026-11-17** (`observability/`); verification partly done (Phase 1 → Status).
 - Distributed tracing; Elasticsearch/Kibana.
@@ -163,7 +163,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ---
 
-### Phase 0 — Foundation and reproducibility (**mostly done**; remaining: run integration tests, optional compose for app deps, optional CI)
+### Phase 0 — Foundation and reproducibility (**mostly done**; remaining: keyset `EXPLAIN ANALYZE`, optional compose for app deps, optional CI)
 
 **Why.** Every later phase needs a reproducible environment, a working read path and a way to know if the process is healthy. Load-testing a 500, or writing K8s probes without health endpoints, teaches nothing.
 
@@ -178,7 +178,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 5. ✅ Config: Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` in `env.ts` with defaults, so only `PG_*` stay required (no sectioning needed). RAG clients are still outside `env.ts`.
 6. ✅ Replace `console.*` with the project logger in non-RAG infrastructure code.
 7. Optional: CI with `npx tsc -p .` + `npm test` (CI change → approval).
-8. ⏳ Integration tests against real PG/Redis: written (`npm run test:integration`), **not yet run**.
+8. ✅ Integration tests against real PG/Redis (`npm run test:integration`): 14/14 passed (owner, 2026-11-17).
 9. ⏳ `EXPLAIN (ANALYZE, BUFFERS)` for the second-page keyset query (expect `Index Scan using movies_created_at_id_idx`); not yet run.
 
 **Exercises.**
@@ -478,8 +478,8 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | ------------------ | ---------------------------------------------- | ----------------------------------------------- | ----------------- |
 | Typecheck          | `npx tsc -p .`                                 | Types/contracts compile under strict settings   | exists            |
 | Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists: RAG, cursor, config, readiness, metrics (124 tests, 2026-11-17) |
-| HTTP (mocked deps) | Vitest + `supertest`, PG/Redis mocked          | Routing, validation, controller → repository    | exists (`src/routes/*.test.ts`; needs local port) |
-| Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | written, not yet run |
+| HTTP (mocked deps) | Vitest + `supertest`, PG/Redis mocked          | Routing, validation, controller → repository    | exists (`src/routes/*.test.ts`; needs local port; passed, owner 2026-11-17) |
+| Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | exists, 14/14 passed (owner, 2026-11-17) |
 | Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16) |
 | Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
 | Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
