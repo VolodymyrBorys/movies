@@ -1,4 +1,7 @@
-import { runCacheInvalidationBatch } from "./cache-invalidation.ts";
+import {
+  refreshOutboxBacklogMetrics,
+  runCacheInvalidationBatch,
+} from "./cache-invalidation.ts";
 import { logger as rootLogger } from "../infrastructure/logger.ts";
 
 const logger = rootLogger.child({ component: "cache-invalidation-worker" });
@@ -14,6 +17,9 @@ function sleep(ms: number): Promise<void> {
 
 async function runLoop(): Promise<void> {
   while (!stopping) {
+    // Throttled internally (10 s) and never throws; runs even when batches fail.
+    await refreshOutboxBacklogMetrics();
+
     try {
       const count = await runCacheInvalidationBatch();
 

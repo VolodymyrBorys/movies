@@ -1,5 +1,6 @@
 import { REDIS } from "../../infrastructure/redis.ts";
 import { logger as rootLogger } from "../../infrastructure/logger.ts";
+import { cacheRequestsTotal } from "../../infrastructure/metrics.ts";
 import { AppError } from "../../utils/errors.ts";
 import {
   decodeMovieCursor,
@@ -52,10 +53,15 @@ export class MovieService {
       const listVersion = await REDIS.getMoviesListVersion();
       cacheKey = `movies:v1:list:v${listVersion}:limit:${limit}:sort:${sort}:cursor:${cursor === null ? "first" : encodeMovieCursor(cursor)}`;
       const cached = await REDIS.get(cacheKey);
-      if (cached !== null) return cached;
+      if (cached !== null) {
+        cacheRequestsTotal.inc({ cache: "movies_list", result: "hit" });
+        return cached;
+      }
+      cacheRequestsTotal.inc({ cache: "movies_list", result: "miss" });
     } catch (error) {
       cacheAvailable = false;
       cacheKey = null;
+      cacheRequestsTotal.inc({ cache: "movies_list", result: "error" });
 
       logger.error({ err: error }, "Movies cache read failed; using PostgreSQL");
     }

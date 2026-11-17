@@ -10,9 +10,17 @@ import {
   type PgConnectionConfig,
   type PostgresConfig,
 } from "../config/env.ts";
+import { Gauge } from "prom-client";
 import { logger as rootLogger } from "./logger.ts";
+import { metricsRegistry } from "./metrics.ts";
 
 const logger = rootLogger.child({ component: "postgres" });
+
+export interface PoolStats {
+  total: number;
+  idle: number;
+  waiting: number;
+}
 
 type PgRole = "primary" | "replica";
 
@@ -75,6 +83,19 @@ export class PgService {
     }
   }
 
+  /** Snapshot of client-side pool state; null before start(). */
+  poolStats(): { write: PoolStats; read: PoolStats } | null {
+    if (this.writePool === undefined || this.readPool === undefined) return null;
+
+    const stats = (pool: Pool): PoolStats => ({
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+    });
+
+    return { write: stats(this.writePool), read: stats(this.readPool) };
+  }
+
   /** Readiness check. Goes through the pool, so pool exhaustion also shows up as "down". */
   async ping(pool: "write" | "read"): Promise<void> {
     await (pool === "write" ? this.writePool : this.readPool).query("SELECT 1");
@@ -127,3 +148,25 @@ export class PgService {
 }
 
 export const PG = new PgService();
+
+// Sampled on each scrape from in-memory pool counters (no DB round-trip).
+// `waiting > 0` sustained = requests queue for a connection: pool saturation.
+// LAB: simplified — this is the client-side view of ONE process; the server-side view
+// (pg_stat_activity, max_connections) comes from postgres_exporter in P1.
+new Gauge({
+  name: "pg_pool_connections",
+  help: "node-postgres pool clients by state (total, idle, waiting requests)",
+  labelNames: ["pool", "state"] as const,
+  registers: [metricsRegistry],
+  collect() {
+    this.reset();
+    const stats = PG.poolStats();
+    if (stats === null) return;
+
+    for (const pool of ["write", "read"] as const) {
+      for (const state of ["total", "idle", "waiting"] as const) {
+        this.set({ pool, state }, stats[pool][state]);
+      }
+    }
+  },
+});
