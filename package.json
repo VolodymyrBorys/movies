@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
+    "test:integration": "node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
     "dev": "node --env-file-if-exists=.env --watch src/server.ts",
     "migrate:up": "node --env-file-if-exists=.env scripts/migrate.ts up",
     "migrate:down": "node --env-file-if-exists=.env scripts/migrate.ts down",
