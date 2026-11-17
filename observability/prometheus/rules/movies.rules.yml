@@ -1,0 +1,130 @@
+# Alert rules for the Movies lab. Runbooks: docs/progress/observability.md
+# Tests: observability/prometheus/tests/movies.rules.test.yml (promtool test rules)
+#
+# Severity:
+#   critical — users are affected or data delivery is stuck; act now
+#   warning  — degraded but serving (e.g. cache down → PostgreSQL fallback)
+#
+# Thresholds are initial guesses; revisit them with P2 load-test numbers.
+
+groups:
+  - name: movies-api
+    rules:
+      - alert: MoviesApiDown
+        expr: up{job="movies-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Prometheus cannot scrape the Movies API
+          runbook_url: docs/progress/observability.md#moviesapidown
+
+      - alert: HighErrorRatio
+        # Second clause: don't page on 1 failed request out of 2 at near-zero traffic.
+        expr: |
+          (
+            sum(rate(http_requests_total{job="movies-api", status_code=~"5.."}[5m]))
+              /
+            sum(rate(http_requests_total{job="movies-api"}[5m]))
+          ) > 0.05
+          and
+          sum(rate(http_requests_total{job="movies-api"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of Movies API requests fail with 5xx
+          runbook_url: docs/progress/observability.md#higherrorratio
+
+      - alert: HighLatencyP99
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="movies-api", method="GET", route="/v1/movies"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: p99 latency of GET /v1/movies is above 500 ms
+          runbook_url: docs/progress/observability.md#highlatencyp99
+
+      - alert: CacheErrors
+        # Redis failures are served from PostgreSQL: degraded, not down.
+        expr: sum(rate(cache_requests_total{result="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Movies list cache lookups are failing (serving from PostgreSQL)
+          runbook_url: docs/progress/observability.md#cacheerrors
+
+      - alert: PgPoolWaiting
+        expr: max by (pool) (pg_pool_connections{state="waiting"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Requests are queueing for a PostgreSQL pool connection
+          runbook_url: docs/progress/observability.md#pgpoolwaiting
+
+  - name: outbox
+    rules:
+      - alert: OutboxBacklogTooOld
+        expr: max(outbox_oldest_pending_age_seconds) > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Oldest pending cache-invalidation event is older than 2 minutes
+          runbook_url: docs/progress/observability.md#outboxbacklogtooold
+
+      - alert: OutboxBacklogStale
+        # Backlog gauges keep their last value when sampling fails; this catches that.
+        expr: time() - max(outbox_backlog_last_refresh_timestamp_seconds) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox backlog metrics have not been refreshed for over a minute
+          runbook_url: docs/progress/observability.md#outboxbacklogstale
+
+      - alert: OutboxDeadLetters
+        # Series are pre-created at 0 in the app, so the first dead letter is visible.
+        expr: sum(increase(outbox_events_total{result="dead_lettered"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A cache-invalidation event was dead-lettered and will not be retried
+          runbook_url: docs/progress/observability.md#outboxdeadletters
+
+  - name: dependencies
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: postgres_exporter cannot connect to PostgreSQL
+          runbook_url: docs/progress/observability.md#postgresdown
+
+      - alert: RedisDown
+        # warning, not critical: Redis is cache-only and never fails readiness.
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: redis_exporter cannot connect to Redis
+          runbook_url: docs/progress/observability.md#redisdown
+
+      - alert: ExporterDown
+        # Without this, a dead exporter makes pg_up/redis_up disappear silently.
+        expr: up{job=~"postgres|redis"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: A metrics exporter cannot be scraped
+          runbook_url: docs/progress/observability.md#exporterdown

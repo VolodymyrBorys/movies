@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # The app on the host (`npm run dev`, PORT=3000).
+  - job_name: movies-api
+    metrics_path: /v1/metrics
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+
+  # Server-side PostgreSQL view (connections by state, max_connections, pg_up).
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # Redis memory, evictions, keyspace hits/misses, redis_up.
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

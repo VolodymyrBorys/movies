@@ -1,0 +1,12 @@
+apiVersion: 1
+
+# Dashboards are code: edit the JSON in observability/grafana/dashboards, not in the UI
+# (UI changes are not saved back).
+providers:
+  - name: movies
+    folder: Movies
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

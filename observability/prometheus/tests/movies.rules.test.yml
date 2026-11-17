@@ -1,0 +1,176 @@
+# Unit tests for alert rules:
+#   docker run --rm -v "$PWD/observability/prometheus:/p:ro" --entrypoint promtool \
+#     prom/prometheus:v3.4.0 test rules /p/tests/movies.rules.test.yml
+#
+# Series notation: 'a+bxN' = start at a, add b each interval, N more samples.
+
+rule_files:
+  - ../rules/movies.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: MoviesApiDown fires after 1m of failed scrapes
+    interval: 1m
+    input_series:
+      - series: 'up{job="movies-api"}'
+        values: "1 1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MoviesApiDown
+        exp_alerts: [] # pending (for: 1m)
+      - eval_time: 4m
+        alertname: MoviesApiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: movies-api
+            exp_annotations:
+              summary: Prometheus cannot scrape the Movies API
+              runbook_url: docs/progress/observability.md#moviesapidown
+
+  - name: HighErrorRatio fires above 5% with real traffic
+    interval: 1m
+    input_series:
+      # 60 ok + 12 failed per minute → 16.7% errors, 1.2 req/s
+      - series: 'http_requests_total{job="movies-api", status_code="200"}'
+        values: "0+60x20"
+      - series: 'http_requests_total{job="movies-api", status_code="500"}'
+        values: "0+12x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: More than 5% of Movies API requests fail with 5xx
+              runbook_url: docs/progress/observability.md#higherrorratio
+
+  - name: HighErrorRatio stays silent at near-zero traffic
+    interval: 1m
+    input_series:
+      # 50% errors, but only ~0.03 req/s
+      - series: 'http_requests_total{job="movies-api", status_code="200"}'
+        values: "0+1x20"
+      - series: 'http_requests_total{job="movies-api", status_code="500"}'
+        values: "0+1x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighErrorRatio
+        exp_alerts: []
+
+  - name: OutboxDeadLetters fires on the first dead letter (series pre-created at 0)
+    interval: 1m
+    input_series:
+      - series: 'outbox_events_total{result="dead_lettered"}'
+        values: "0 0 0 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OutboxDeadLetters
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: OutboxDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: A cache-invalidation event was dead-lettered and will not be retried
+              runbook_url: docs/progress/observability.md#outboxdeadletters
+
+  - name: OutboxBacklogTooOld fires when the oldest event stays over 2 minutes
+    interval: 1m
+    input_series:
+      - series: "outbox_oldest_pending_age_seconds"
+        values: "0 30 90 150 210 270 330"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxBacklogTooOld
+        exp_alerts: [] # just crossed, pending
+      - eval_time: 5m
+        alertname: OutboxBacklogTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Oldest pending cache-invalidation event is older than 2 minutes
+              runbook_url: docs/progress/observability.md#outboxbacklogtooold
+
+  - name: OutboxBacklogStale fires when the refresh timestamp stops moving
+    interval: 1m
+    input_series:
+      # In promtool, time() at eval_time T is T in seconds; refresh stops at 120s.
+      - series: "outbox_backlog_last_refresh_timestamp_seconds"
+        values: "0 60 120 120 120 120 120 120"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxBacklogStale
+        exp_alerts: [] # 180-120 = 60, not > 60
+      - eval_time: 6m
+        alertname: OutboxBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Outbox backlog metrics have not been refreshed for over a minute
+              runbook_url: docs/progress/observability.md#outboxbacklogstale
+
+  - name: CacheErrors is a warning, not critical
+    interval: 1m
+    input_series:
+      - series: 'cache_requests_total{cache="movies_list", result="error"}'
+        values: "0+5x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CacheErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Movies list cache lookups are failing (serving from PostgreSQL)
+              runbook_url: docs/progress/observability.md#cacheerrors
+
+  - name: PgPoolWaiting fires per pool
+    interval: 1m
+    input_series:
+      - series: 'pg_pool_connections{pool="read", state="waiting"}'
+        values: "0 2 3 3 4 4"
+      - series: 'pg_pool_connections{pool="write", state="waiting"}'
+        values: "0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PgPoolWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pool: read
+            exp_annotations:
+              summary: Requests are queueing for a PostgreSQL pool connection
+              runbook_url: docs/progress/observability.md#pgpoolwaiting
+
+  - name: RedisDown is a warning; PostgresDown is critical
+    interval: 1m
+    input_series:
+      - series: 'redis_up{job="redis"}'
+        values: "1 0 0 0"
+      - series: 'pg_up{job="postgres"}'
+        values: "1 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RedisDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: redis
+            exp_annotations:
+              summary: redis_exporter cannot connect to Redis
+              runbook_url: docs/progress/observability.md#redisdown
+      - eval_time: 3m
+        alertname: PostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: postgres
+            exp_annotations:
+              summary: postgres_exporter cannot connect to PostgreSQL
+              runbook_url: docs/progress/observability.md#postgresdown

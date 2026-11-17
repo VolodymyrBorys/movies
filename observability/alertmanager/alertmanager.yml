@@ -1,0 +1,13 @@
+# Local lab: alerts are grouped and visible at http://localhost:9093, nothing is sent out.
+# LAB: simplified — production would route by severity to real receivers
+# (critical → on-call pager, warning → chat channel) and add inhibition rules.
+
+route:
+  receiver: "null"
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: "null"

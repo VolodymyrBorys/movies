@@ -1,0 +1,102 @@
+# Observability stack for the Movies lab (roadmap P1).
+# The app, PostgreSQL and Redis run on the HOST; containers reach them via host.docker.internal.
+#
+#   cp observability/env.example observability/.env   # fill in secrets (gitignored)
+#   docker compose -f observability/compose.yml --env-file observability/.env up -d
+#
+# Pass --env-file explicitly: some Compose versions read the implicit .env from the
+# current directory (from the repo root that is the APP's .env, without these variables).
+#
+# All published ports bind to 127.0.0.1: /v1/metrics and Grafana have no auth here.
+# LAB: simplified — production would also add auth/TLS in front of Grafana/Prometheus,
+# remote storage or HA Prometheus, and real Alertmanager receivers.
+#
+# Image tags are pinned (never `latest`). They were the newest the author knew of;
+# check for newer patch releases before relying on this stack.
+
+name: movies-observability
+
+x-host-access: &host-access
+  # Docker Desktop provides host.docker.internal; this also makes it work on Linux.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    <<: *host-access
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # Allows `curl -X POST localhost:9090/-/reload` after editing rules.
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - alertmanager
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in observability/.env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      # 3000 is taken by the app.
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    <<: *host-access
+    environment:
+      # Dedicated least-privilege role (GRANT pg_monitor), not the app's credentials.
+      DATA_SOURCE_URI: host.docker.internal:${PG_EXPORTER_PORT:-5432}/${PG_EXPORTER_DATABASE:?set PG_EXPORTER_DATABASE in observability/.env}?sslmode=${PG_EXPORTER_SSLMODE:-disable}
+      DATA_SOURCE_USER: ${PG_EXPORTER_USER:-movies_monitor}
+      DATA_SOURCE_PASS: ${PG_EXPORTER_PASSWORD:?set PG_EXPORTER_PASSWORD in observability/.env}
+    # Not published: only Prometheus scrapes it over the compose network.
+    expose:
+      - "9187"
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    <<: *host-access
+    environment:
+      REDIS_ADDR: redis://host.docker.internal:${REDIS_EXPORTER_PORT:-6379}
+      REDIS_USER: ${REDIS_EXPORTER_USER:-}
+      REDIS_PASSWORD: ${REDIS_EXPORTER_PASSWORD:-}
+    expose:
+      - "9121"
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
