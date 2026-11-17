@@ -119,7 +119,23 @@ Findings:
   not measured). Collapse `method` to `other` for unmatched routes if it ever matters.
 - Double slashes (`/v1//movies`) and unknown sub-paths (`/v1/movies/123` for GET) → `unmatched`.
 
-Live check (Prometheus) — **not run yet**:
+Live check (owner, 2026-11-17, app restarted with the fix):
+- **Total: 2437 head series** (prometheus 848, postgres 858, redis 511, movies-api 139 live /
+  188 in head incl. series of the previous process). Nothing near a cardinality problem.
+- Largest metrics are Prometheus' own and exporter histograms (≤ 105 series each);
+  app `http_request_duration_seconds_bucket` = 22 live (2 route/method combos × 11 buckets).
+- `count by (route, method) (http_requests_total)`: only `GET /v1/movies` and `GET /readyz`
+  (no PATCH since restart); no IDs, no `/V1`.
+- **Finding (accepted, not fixed):** `pg_stat_activity_count` / `pg_stat_activity_max_tx_duration`
+  carry the client-set `application_name`. pgAdmin sets values with IDs
+  (`pgAdmin 4 - CONN:1348384`), so each new pgAdmin connection creates new series (churn),
+  and these labels also list every database in the cluster, not only the app's.
+  Locally negligible (34 series). Production fix belongs at the source: a policy that
+  `application_name` is a fixed service name (the app already uses `movies-api:primary`).
+  Relabelling it away in Prometheus would collide series (duplicate samples), so it is not
+  done here. Whether a postgres_exporter flag can drop the label is unchecked.
+
+Queries used:
 ```promql
 topk(15, count by (__name__) ({__name__=~".+"}))
 count by (job) ({__name__=~".+"})

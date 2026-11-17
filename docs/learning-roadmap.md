@@ -206,7 +206,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - ✅ Grafana dashboard validated under traffic (`scripts/load-test.ts` + PATCHes, owner, 2026-11-17); evictions query and outbox `increase()` panel added afterwards (not yet re-checked).
 - ⏳ Not run: `promtool check config`, `amtool check-config` (commands in the progress doc).
 - ✅ SLOs for `GET /v1/movies` (availability 99.5%, latency 99% ≤ 250 ms, 30d) with multi-window burn-rate alerts (fast 14.4×/6×, slow 1×), recording rules, traffic guards; `promtool check rules` + `test rules` SUCCESS (assistant, local promtool 3.15.0, 2026-11-17). Not yet observed firing live.
-- ✅ Label-cardinality review by code (2026-11-17): all labels bounded; fixed `route` taking the client's casing from `req.baseUrl` (`/V1/movies` escaped SLO/alerts), regression tests passed (owner). Live Prometheus check (queries in the progress doc) not run yet.
+- ✅ Label-cardinality review by code (2026-11-17): all labels bounded; fixed `route` taking the client's casing from `req.baseUrl` (`/V1/movies` escaped SLO/alerts), regression tests passed (owner). Live check (owner): 2437 series total, app labels clean; client-set `application_name` in postgres_exporter (pgAdmin includes connection IDs) noted and accepted.
 - ⏳ Not started: replica-lag alert (no replica locally).
 
 **Why Prometheus/Grafana.** Metrics are cheap, aggregatable time series — the right tool to answer "is it healthy and how fast" and to fire alerts. Without them, Phases 2–5 have no way to show cause and effect.
