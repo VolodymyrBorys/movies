@@ -53,7 +53,10 @@ docker run --rm -v "$PWD/observability/prometheus:/p:ro" --entrypoint promtool \
 
 # Rule unit tests (synthetic series, no running stack needed)
 docker run --rm -v "$PWD/observability/prometheus:/p:ro" --entrypoint promtool \
-  prom/prometheus:v3.4.0 test rules /p/tests/movies.rules.test.yml
+  prom/prometheus:v3.4.0 test rules /p/tests/movies.rules.test.yml /p/tests/slo.rules.test.yml
+
+# Or with a local promtool (Homebrew), from observability/prometheus:
+#   promtool check rules rules/*.rules.yml && promtool test rules tests/*.test.yml
 
 # Alertmanager config
 docker run --rm -v "$PWD/observability/alertmanager:/a:ro" --entrypoint amtool \
@@ -83,6 +86,34 @@ Record outcomes (time to fire, time to resolve, surprises) at the bottom of this
 - Thresholds (5% errors, 500 ms p99, 120 s outbox age) are guesses until P2 load tests.
 - Node.js default metrics carry a double prefix (`nodejs_nodejs_*`) because the app registers them with `prefix: "nodejs_"`. Renaming would change metric names; left as is.
 - Outbox counters are per process and reset on restart; alerts use `increase()`/`rate()`.
+- SLOs are defined over 30d, but retention is 7d: burn-rate alerts work (longest window 3d),
+  "remaining 30d budget" cannot be computed. The slow-burn alert needs 3d of data after a
+  fresh Prometheus volume to be meaningful.
+- SLO targets (99.5% availability, 99% ≤ 250 ms) and traffic guards (0.1 / 0.01 req/s) are
+  guesses until P2. `HighErrorRatio`/`HighLatencyP99` overlap with the SLO alerts; kept for
+  comparison, decide after drills.
+
+## SLOs and burn-rate alerts
+
+Rules: `observability/prometheus/rules/slo.rules.yml` (table of SLOs, windows and burn rates
+in the header). Both SLOs cover `GET /v1/movies` only.
+
+| SLO | Good event | Target (30d) | Error budget |
+|---|---|---|---|
+| `movies_list_availability` | response is not 5xx (4xx count as good) | 99.5% | 0.5% |
+| `movies_list_latency` | request ≤ 250 ms (`le="0.25"` bucket) | 99% | 1% |
+
+- **Burn rate** = observed error ratio / error budget. 1× spends exactly the 30d budget in
+  30d; 14.4× spends 2% of it in 1h.
+- **Two windows per alert:** the long window proves the burn is significant, the short one
+  makes the alert resolve soon after the burn stops. `Fast` (critical) = 14.4× over 1h+5m
+  **or** 6× over 6h+30m; `Slow` (warning) = 1× over 3d+6h.
+- **Why 250 ms:** a ratio "requests under X" is exact only when X is a histogram bucket
+  boundary (buckets: …, 0.1, 0.25, 0.5, …). Changing the threshold means changing buckets.
+- **Traffic guards:** without them one failed request out of two is a 50% error ratio ≈ 100×
+  burn. Below the guard the SLO alerts are silent; `MoviesApiDown` still covers a dead app.
+- Recording rules `slo:movies_list_{availability,latency}_errors:ratio_rate{5m,30m,1h,6h,3d}`
+  and `slo:movies_list_requests:rate{1h,6h,3d}` can be graphed directly in Prometheus.
 
 ---
 
@@ -96,6 +127,24 @@ Prometheus cannot scrape `host.docker.internal:3000/v1/metrics`.
 1. Is the app running? `curl -i localhost:3000/healthz`.
 2. Prometheus → Status → Targets: error text (connection refused vs timeout vs 404).
 3. If the app is up but the target is down: Docker → host networking (`host.docker.internal`), port changed (`PORT`).
+
+### MoviesListAvailabilityBudgetBurn
+
+`…Fast` (critical) / `…Slow` (warning): 5xx on `GET /v1/movies` are spending the 0.5% error
+budget too fast. Fast = page now; Slow = a ticket, the budget will run out before 30d.
+1. Prometheus: `slo:movies_list_availability_errors:ratio_rate5m` vs `…_rate1h` — still
+   burning or already over (Fast stays firing up to 30m after recovery via the 6h/30m pair)?
+2. Same checks as [HighErrorRatio](#higherrorratio): logs by `status_code >= 500`, `/readyz`.
+3. Slow only: look for a steady low error rate (e.g. timeouts on a slow query) rather than an
+   outage; compare `ratio_rate3d` with `ratio_rate6h`.
+
+### MoviesListLatencyBudgetBurn
+
+`…Fast` / `…Slow`: more than 1% of `GET /v1/movies` requests take over 250 ms.
+1. Dashboard "GET /v1/movies latency" + "Cache hit ratio": a cache outage adds a PostgreSQL
+   round trip and up to the 1 s Redis command timeout per request.
+2. `pg_pool_connections{state="waiting"}`, event loop lag, PostgreSQL server connections.
+3. Same checks as [HighLatencyP99](#highlatencyp99).
 
 ### HighErrorRatio
 

@@ -1,0 +1,145 @@
+# Unit tests for SLO recording rules and burn-rate alerts:
+#   docker run --rm -v "$PWD/observability/prometheus:/p:ro" --entrypoint promtool \
+#     prom/prometheus:v3.4.0 test rules /p/tests/slo.rules.test.yml
+#
+# Series notation: 'a+bxN' = start at a, add b each interval, N more samples.
+# Counters start at 0, so rate() does not extrapolate below zero and ratios are exact.
+# Ratios are checked as round(x * 1000) to avoid float noise (1 - 0.9 = 0.0999…).
+
+rule_files:
+  - ../rules/slo.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: Recording rules compute error ratios; 4xx and other routes don't count as errors
+    interval: 1m
+    input_series:
+      # GET /v1/movies: 60 req/min = 48 x 200 + 6 x 404 + 6 x 500 → availability errors 10%
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+48x10"
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="404"}'
+        values: "0+6x10"
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="500"}'
+        values: "0+6x10"
+      # Another route failing completely must not affect the SLI.
+      - series: 'http_requests_total{job="movies-api", method="PATCH", route="/v1/movies/:id", status_code="500"}'
+        values: "0+60x10"
+      # 57 of 60 requests <= 250 ms → latency errors 5%
+      - series: 'http_request_duration_seconds_bucket{job="movies-api", method="GET", route="/v1/movies", status_code="200", le="0.25"}'
+        values: "0+57x10"
+      - series: 'http_request_duration_seconds_count{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+60x10"
+    promql_expr_test:
+      - expr: round(slo:movies_list_availability_errors:ratio_rate5m * 1000)
+        eval_time: 10m
+        exp_samples:
+          - labels: "{}"
+            value: 100
+      - expr: round(slo:movies_list_latency_errors:ratio_rate5m * 1000)
+        eval_time: 10m
+        exp_samples:
+          - labels: "{}"
+            value: 50
+
+  - name: Availability fast burn fires, outlives the incident on the 6h/30m pair, then hands over to slow burn
+    interval: 1m
+    input_series:
+      # 1 req/s for 70m; 10% are 5xx during the first 30m (burn rate 20x > 14.4x), then 0.
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+54x70"
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="500"}'
+        values: "0+6x30 180+0x40"
+    alert_rule_test:
+      # 25m: 1h and 5m windows both at 10% errors → fast fires.
+      # Slow does not: 1500 requests / 3d = 0.006 req/s < 0.01 traffic guard.
+      - eval_time: 25m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              slo: movies_list_availability
+            exp_annotations:
+              summary: GET /v1/movies 5xx are burning the availability error budget fast (≥2% of 30d budget in 1h or ≥5% in 6h)
+              runbook_url: docs/progress/observability.md#movieslistavailabilitybudgetburn
+      - eval_time: 25m
+        alertname: MoviesListAvailabilityBudgetBurnSlow
+        exp_alerts: []
+      # 40m: errors stopped 10m ago. 1h/5m pair: 5m window is clean → no.
+      # 6h/30m pair: 6h ≈ 7.5%, 30m ≈ 6.8% (> 3%), 2400 requests / 6h = 0.11 req/s → still firing.
+      - eval_time: 40m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              slo: movies_list_availability
+            exp_annotations:
+              summary: GET /v1/movies 5xx are burning the availability error budget fast (≥2% of 30d budget in 1h or ≥5% in 6h)
+              runbook_url: docs/progress/observability.md#movieslistavailabilitybudgetburn
+      # 66m: both short windows (5m, 30m) are clean → fast resolved.
+      # Slow: 3d and 6h ≈ 4.8% > 0.5%, 3744 requests / 3d = 0.014 req/s → fires.
+      - eval_time: 66m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 66m
+        alertname: MoviesListAvailabilityBudgetBurnSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              slo: movies_list_availability
+            exp_annotations:
+              summary: GET /v1/movies 5xx are consuming the availability error budget faster than it accrues (≥10% of 30d budget in 3d)
+              runbook_url: docs/progress/observability.md#movieslistavailabilitybudgetburn
+
+  - name: Low traffic does not page even at a 50% error ratio
+    interval: 1m
+    input_series:
+      # 2 req/min (0.033 req/s < 0.1 guard), half of them 5xx.
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+1x60"
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="500"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: MoviesListAvailabilityBudgetBurnSlow
+        exp_alerts: []
+
+  - name: Client errors (4xx) do not burn the availability budget
+    interval: 1m
+    input_series:
+      # 1 req/s, half of them 404.
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+30x30"
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="404"}'
+        values: "0+30x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts: []
+
+  - name: Slow responses burn the latency budget, not the availability budget
+    interval: 1m
+    input_series:
+      # 1 req/s, all 200, 20% slower than 250 ms (burn rate 20x > 14.4x).
+      - series: 'http_requests_total{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+60x30"
+      - series: 'http_request_duration_seconds_bucket{job="movies-api", method="GET", route="/v1/movies", status_code="200", le="0.25"}'
+        values: "0+48x30"
+      - series: 'http_request_duration_seconds_count{job="movies-api", method="GET", route="/v1/movies", status_code="200"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MoviesListLatencyBudgetBurnFast
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              slo: movies_list_latency
+            exp_annotations:
+              summary: GET /v1/movies requests slower than 250 ms are burning the latency error budget fast (≥2% of 30d budget in 1h or ≥5% in 6h)
+              runbook_url: docs/progress/observability.md#movieslistlatencybudgetburn
+      - eval_time: 20m
+        alertname: MoviesListAvailabilityBudgetBurnFast
+        exp_alerts: []
