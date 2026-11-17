@@ -62,6 +62,21 @@ export const outboxOldestPendingAge = new Gauge({
   registers: [metricsRegistry],
 });
 
+// Pre-create every known series at 0. A labelled counter series otherwise appears only on
+// its first inc(), and increase()/rate() cannot see the jump from "absent" to 1 — the
+// first dead-lettered event would never fire OutboxDeadLetters.
+for (const result of ["hit", "miss", "error"] as const) {
+  cacheRequestsTotal.inc({ cache: "movies_list", result }, 0);
+}
+for (const result of [
+  "processed",
+  "retry_scheduled",
+  "dead_lettered",
+  "reschedule_failed",
+] as const satisfies readonly OutboxEventResult[]) {
+  outboxEventsTotal.inc({ result }, 0);
+}
+
 /**
  * When the backlog gauges were last refreshed. The two gauges above keep their last
  * value if sampling fails; alert on `time() - this > N` to catch stale backlog data.
