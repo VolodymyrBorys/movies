@@ -163,7 +163,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 ---
 
-### Phase 0 — Foundation and reproducibility (**mostly done**; remaining: keyset `EXPLAIN ANALYZE`, optional compose for app deps, optional CI)
+### Phase 0 — Foundation and reproducibility (**mostly done**; remaining: optional compose for app deps, optional CI)
 
 **Why.** Every later phase needs a reproducible environment, a working read path and a way to know if the process is healthy. Load-testing a 500, or writing K8s probes without health endpoints, teaches nothing.
 
@@ -179,7 +179,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 6. ✅ Replace `console.*` with the project logger in non-RAG infrastructure code.
 7. Optional: CI with `npx tsc -p .` + `npm test` (CI change → approval).
 8. ✅ Integration tests against real PG/Redis (`npm run test:integration`): 14/14 passed (owner, 2026-11-17).
-9. ⏳ `EXPLAIN (ANALYZE, BUFFERS)` for the second-page keyset query (expect `Index Scan using movies_created_at_id_idx`); not yet run.
+9. ✅ `EXPLAIN (ANALYZE, BUFFERS)` for the second-page keyset query on 1M seeded rows (owner, 2026-11-19): `Index Scan using movies_created_at_id_idx`, row comparison as `Index Cond`, no `Sort`, 5 buffers, 0.11 ms warm; `OFFSET 500000` for comparison: ~38k buffers, 169 ms. Details and findings: `docs/progress/postgres.md`.
 
 **Exercises.**
 
@@ -243,7 +243,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 **Prerequisites.** P0 (working read path), P1 (to correlate client and server signals).
 
-**Scope.** Scenarios: read-heavy (cached), cache-cold, mixed read/write (PATCH triggers invalidation), soak (1 h), spike. Seed script for realistic data volume (e.g. 1M movies).
+**Scope.** Scenarios: read-heavy (cached), cache-cold, mixed read/write (PATCH triggers invalidation), soak (1 h), spike. Seed script for realistic data volume — ✅ done early (2026-11-19): `scripts/seed-movies.sql`, 1M rows loaded into the app DB (`docs/progress/postgres.md`).
 
 **Exercises.**
 
@@ -488,7 +488,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16) |
 | Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
 | Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
-| Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | P3                |
+| Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | first plan recorded (keyset vs OFFSET, 1M rows, 2026-11-19); P3 |
 | Messaging          | real broker, kill/crash drills                 | At-least-once, idempotency, DLQ                 | P5                |
 | Observability      | `promtool test rules`, drills via `scripts/watch-alerts.ts` | Alerts fire and resolve           | P1 (rule tests pass; 1 of ~5 drills done), P6 |
 | AI evals           | golden sets, fixtures, live runs               | Retrieval/agent quality over time               | P7, P8            |
