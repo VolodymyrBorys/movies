@@ -8,14 +8,13 @@ import { getMoviesQuerySchema } from "../modules/movies/validation/get-movies.ts
 import {
   createMovie,
   deleteMovie,
+  getMovieById,
   getMovies,
   updateMovie,
 } from "../modules/movies/movies.controller.ts";
 import { createMovieBodySchema } from "../modules/movies/validation/create-movie.ts";
-import {
-  updateMovieBodySchema,
-  updateMovieParamsSchema,
-} from "../modules/movies/validation/update-movie.ts";
+import { movieIdParamsSchema } from "../modules/movies/validation/movie-id-params.ts";
+import { updateMovieBodySchema } from "../modules/movies/validation/update-movie.ts";
 
 export const router = Router();
 
@@ -31,15 +30,21 @@ router.post(
   asyncHandler(createMovie),
 );
 
+router.get(
+  "/movies/:id",
+  validate("params", movieIdParamsSchema),
+  asyncHandler(getMovieById),
+);
+
 router.patch(
   "/movies/:id",
-  validate("params", updateMovieParamsSchema),
+  validate("params", movieIdParamsSchema),
   validate("body", updateMovieBodySchema),
   asyncHandler(updateMovie),
 );
 
 router.delete(
   "/movies/:id",
-  validate("params", updateMovieParamsSchema),
+  validate("params", movieIdParamsSchema),
   asyncHandler(deleteMovie),
 );

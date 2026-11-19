@@ -36,6 +36,7 @@ const { metricsRegistry } = await import("../infrastructure/metrics.ts");
 const { metricValue } = await import("../test/metric-value.ts");
 
 const readQuery = vi.mocked(PG.readQuery);
+const writeQuery = vi.mocked(PG.writeQuery);
 const transaction = vi.mocked(PG.transaction);
 const redisGet = vi.mocked(REDIS.get);
 const redisSet = vi.mocked(REDIS.set);
@@ -253,6 +254,71 @@ describe("PATCH /v1/movies/:id", () => {
     expect(res.status).toBe(404);
     expect(query).toHaveBeenCalledTimes(1);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /v1/movies/:id", () => {
+  const movie = {
+    id: ID1,
+    title: "Arrival",
+    description: null,
+    release_year: 2016,
+    duration_minutes: 116,
+    created_at: "2026-11-19T10:00:00.123456Z",
+    status: "published",
+    version: 3,
+  };
+
+  it("returns the movie from the primary (read-after-write), not the replica", async () => {
+    writeQuery.mockResolvedValue({ rows: [movie] } as never);
+
+    const res = await request(app).get(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ data: movie });
+
+    expect(writeQuery).toHaveBeenCalledTimes(1);
+    expect(readQuery).not.toHaveBeenCalled();
+    const [sql, params] = writeQuery.mock.calls[0]!;
+    expect(sql).toMatch(/FROM movies\s+WHERE id = \$1/);
+    expect(sql).toMatch(/to_char\(created_at AT TIME ZONE 'UTC'.*\) AS created_at/);
+    expect(params).toEqual([ID1]);
+  });
+
+  it("does not touch the list cache", async () => {
+    writeQuery.mockResolvedValue({ rows: [movie] } as never);
+
+    await request(app).get(`/v1/movies/${ID1}`);
+
+    expect(getVersion).not.toHaveBeenCalled();
+    expect(redisGet).not.toHaveBeenCalled();
+    expect(redisSet).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the movie does not exist", async () => {
+    writeQuery.mockResolvedValue({ rows: [] } as never);
+
+    const res = await request(app).get(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
+  });
+
+  it("rejects a non-uuid id with 400 and does not hit storage", async () => {
+    const res = await request(app).get("/v1/movies/42");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(writeQuery).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 (not 404) when PostgreSQL fails", async () => {
+    // Once: beforeEach's clearAllMocks keeps implementations, so a sticky rejection would leak.
+    writeQuery.mockRejectedValueOnce(new Error("connection terminated"));
+
+    const res = await request(app).get(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(500);
   });
 });
 

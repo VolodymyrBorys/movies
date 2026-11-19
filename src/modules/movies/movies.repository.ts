@@ -106,6 +106,24 @@ class MoviesRepository {
     };
   }
 
+  async getMovieById(id: string): Promise<MovieDetailsRow | null> {
+    // Primary, not the replica: this is a read-after-write path (POST → Location → GET,
+    // and in C5 GET → ETag → PATCH If-Match). A lagging replica would return a false 404
+    // or a stale version (→ false 412).
+    // LAB: simplified — production could serve it from the replica with read-your-writes
+    // (client carries the commit LSN, replica waits for replay); replica exercise in P3.
+    const result = await PG.writeQuery<MovieDetailsRow>(
+      `
+        SELECT ${MOVIE_DETAILS_COLUMNS}
+        FROM movies
+        WHERE id = $1
+      `,
+      [id],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
   async createMovie(movie: NewMovie): Promise<MovieDetailsRow> {
     // LAB: simplified — POST is not idempotent: a client retry after a lost response
     // creates a duplicate. Production would accept an Idempotency-Key and store it with

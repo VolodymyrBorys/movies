@@ -83,6 +83,12 @@ export class MovieService {
     return page;
   }
 
+  async getMovieById(id: string): Promise<MovieDetailsRow | null> {
+    // LAB: simplified — not cached; only the list is. A per-movie cache key would need its
+    // own invalidation (outbox event per id), which the list version key doesn't cover.
+    return moviesRepository.getMovieById(id);
+  }
+
   async createMovie(body: CreateMovieBody): Promise<MovieDetailsRow> {
     const movie = await moviesRepository.createMovie({
       title: body.title,

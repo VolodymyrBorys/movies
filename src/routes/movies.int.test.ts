@@ -183,6 +183,54 @@ describe("PATCH /v1/movies/:id (real PostgreSQL)", () => {
   });
 });
 
+describe("GET /v1/movies/:id (real PostgreSQL)", () => {
+  it("returns the full movie with the microsecond created_at", async () => {
+    const id = await insertMovie({
+      createdAt: "2026-01-01T00:00:00.000007Z",
+      status: "published",
+      version: 4,
+    });
+
+    const res = await request(app).get(`/v1/movies/${id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      id,
+      title: "Test movie",
+      description: null,
+      release_year: 2000,
+      duration_minutes: 100,
+      created_at: "2026-01-01T00:00:00.000007Z",
+      status: "published",
+      version: 4,
+    });
+  });
+
+  it("serves the Location of a just-created movie (read-after-write)", async () => {
+    const created = await request(app).post("/v1/movies").send({
+      title: "Arrival",
+      releaseYear: 2016,
+      durationMinutes: 116,
+    });
+    expect(created.status).toBe(201);
+
+    const res = await request(app).get(created.headers.location!);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual(created.body.data);
+  });
+
+  it("returns 404 after the movie is deleted", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+    expect((await request(app).delete(`/v1/movies/${id}`)).status).toBe(204);
+
+    const res = await request(app).get(`/v1/movies/${id}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
+  });
+});
+
 describe("POST /v1/movies (real PostgreSQL)", () => {
   const body = {
     title: "Arrival",
