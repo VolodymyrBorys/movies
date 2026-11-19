@@ -20,7 +20,10 @@
 -- * Inserted ORDER BY created_at: physical order follows time like an organically grown
 --   table (pg_stats.correlation ≈ ±1). Random insert order would make index scans look
 --   more expensive to the planner than in production.
--- * 1% legacy rows with NULL status/version (the schema allows it; see roadmap P3).
+-- * 1% "legacy" rows: status 'draft', version 1. They used to be NULL; since migrations
+--   *_movies_status_version_{backfill,not_null}.sql both columns are NOT NULL and the
+--   backfill wrote exactly these values, so a DB seeded before the migration and one
+--   seeded after it hold the same data.
 
 \set ON_ERROR_STOP on
 \timing on
@@ -59,12 +62,12 @@ FROM (
          -- regular row: power(random(), 2) puts more rows near the end of the range
          ELSE timestamptz '2026-11-19 00:00:00+00' - make_interval(secs => 94608000 * power(random(), 2))
     END AS created_at,
-    CASE WHEN r_status < 0.01 THEN NULL
+    CASE WHEN r_status < 0.01 THEN 'draft' -- legacy rows: the backfill value
          WHEN r_status < 0.71 THEN 'published'
          WHEN r_status < 0.91 THEN 'draft'
          ELSE 'archived'
     END AS status,
-    CASE WHEN r_status < 0.01 THEN NULL
+    CASE WHEN r_status < 0.01 THEN 1 -- legacy rows: the backfill value
          ELSE 1 + floor(power(random(), 3) * 5)::int
     END AS version
   -- One random() per row for status, so status and version agree on the legacy 1%.

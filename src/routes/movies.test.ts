@@ -213,12 +213,23 @@ describe("PATCH /v1/movies/:id", () => {
   }
 
   it("rejects a non-uuid id with 400 and does not hit storage", async () => {
-    const res = await request(app).patch("/v1/movies/42").send({ status: "x" });
+    const res = await request(app).patch("/v1/movies/42").send({ status: "published" });
 
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
     expect(transaction).not.toHaveBeenCalled();
   });
+
+  it.each([["deleted"], [""], ["Published"]])(
+    "rejects status %j outside the enum with 400 and does not hit storage",
+    async (status) => {
+      const res = await request(app).patch(`/v1/movies/${ID1}`).send({ status });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(transaction).not.toHaveBeenCalled();
+    },
+  );
 
   it("updates the movie and enqueues invalidation in the same transaction", async () => {
     const query = fakeTransaction([{ id: ID1, status: "published", version: 2 }]);

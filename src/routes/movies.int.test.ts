@@ -405,6 +405,68 @@ describe("DELETE /v1/movies/:id (real PostgreSQL)", () => {
   });
 });
 
+describe("movies status/version constraints (migrated schema)", () => {
+  async function pgErrorOf(sql: string, params: unknown[] = []) {
+    try {
+      await PG.writeQuery(sql, params);
+    } catch (error) {
+      return error as { code?: string; constraint?: string; column?: string };
+    }
+    throw new Error("expected the statement to fail");
+  }
+
+  it("fills status and version from column defaults", async () => {
+    const { rows } = await PG.writeQuery<{ status: string; version: number }>(
+      `INSERT INTO movies (title, release_year, duration_minutes)
+       VALUES ('Defaults', 2000, 100)
+       RETURNING status, version`,
+    );
+
+    expect(rows[0]).toEqual({ status: "draft", version: 1 });
+  });
+
+  it.each([
+    ["status", "UPDATE movies SET status = NULL WHERE id = $1"],
+    ["version", "UPDATE movies SET version = NULL WHERE id = $1"],
+  ])("rejects NULL %s (23502 not_null_violation)", async (column, sql) => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    const error = await pgErrorOf(sql, [id]);
+
+    expect(error.code).toBe("23502");
+    expect(error.column).toBe(column);
+  });
+
+  it("rejects a status outside the enum (23514 movies_status_valid)", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    const error = await pgErrorOf("UPDATE movies SET status = 'deleted' WHERE id = $1", [id]);
+
+    expect(error.code).toBe("23514");
+    expect(error.constraint).toBe("movies_status_valid");
+  });
+
+  it("keeps only movies_status_valid; the helper NOT NULL checks are dropped", async () => {
+    const { rows } = await PG.writeQuery<{ conname: string; convalidated: boolean }>(
+      `SELECT conname, convalidated FROM pg_constraint
+       WHERE conrelid = 'movies'::regclass AND contype = 'c' AND conname LIKE 'movies_status%'
+          OR conrelid = 'movies'::regclass AND contype = 'c' AND conname LIKE 'movies_version%'
+       ORDER BY conname`,
+    );
+
+    expect(rows).toEqual([{ conname: "movies_status_valid", convalidated: true }]);
+  });
+
+  it("PATCH with a status outside the enum is a 400, not a constraint 500", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z", status: "draft" });
+
+    const res = await request(app).patch(`/v1/movies/${id}`).send({ status: "deleted" });
+
+    expect(res.status).toBe(400);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
 describe("GET /readyz (real dependencies)", () => {
   it("reports ready with all checks up", async () => {
     const res = await request(app).get("/readyz");

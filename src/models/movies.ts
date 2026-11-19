@@ -3,7 +3,10 @@ import type { QueryResultRow } from "pg";
 export const MOVIES = "movies";
 export const MOVIE = "movie";
 
-export type MovieStatus = "draft" | "published" | "archived";
+// Must match the DB constraint movies_status_valid (migrations/*_movies_status_version_backfill.sql).
+export const MOVIE_STATUSES = ["draft", "published", "archived"] as const;
+
+export type MovieStatus = (typeof MOVIE_STATUSES)[number];
 
 export interface UpdateMovieInput {
   id: string;
@@ -36,9 +39,9 @@ export interface MovieDetailsRow extends QueryResultRow {
   duration_minutes: number;
   /** RFC 3339 UTC with microseconds, formatted in SQL ("2026-11-19T10:00:00.123456Z"). */
   created_at: string;
-  // Nullable until a migration tightens them (roadmap P3, step C4).
-  status: string | null;
-  version: number | null;
+  // NOT NULL since migration *_movies_status_version_not_null.sql.
+  status: MovieStatus;
+  version: number;
 }
 
 export interface MoviePage {

@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { MOVIE_STATUSES } from "../../../models/movies.ts";
 
 export const updateMovieBodySchema = z
   .object({
-    status: z.string(),
+    // Same enum as the DB CHECK movies_status_valid: an unknown status is a 400 here,
+    // not a constraint violation (500) in PostgreSQL.
+    status: z.enum(MOVIE_STATUSES),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, {

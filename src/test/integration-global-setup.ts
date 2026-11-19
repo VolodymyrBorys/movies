@@ -27,6 +27,8 @@ export default async function setup(): Promise<void> {
     direction: "up",
     count: Infinity,
     checkOrder: true,
+    // Same transaction mode as scripts/migrate.ts (one transaction per migration).
+    singleTransaction: false,
     log: () => {},
   });
 }

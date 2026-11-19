@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MOVIE_STATUSES } from "../../../models/movies.ts";
 
 // Mirrors the DB constraints on `movies` (baseline migration), so invalid input is a 400
 // here instead of a CHECK violation (500) in PostgreSQL.
@@ -8,7 +9,7 @@ export const createMovieBodySchema = z
     description: z.string().max(5000).optional(),
     releaseYear: z.number().int().min(1888).max(2100),
     durationMinutes: z.number().int().min(1).max(1000),
-    status: z.enum(["draft", "published", "archived"]).default("draft"),
+    status: z.enum(MOVIE_STATUSES).default("draft"),
   })
   // Rejects client-supplied id/version/created_at instead of silently ignoring them.
   .strict();

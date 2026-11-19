@@ -87,6 +87,12 @@ const options: RunnerOption = {
   fake: args.fake,
   dryRun: args.dryRun,
   checkOrder: true,
+  // One transaction PER migration (library default: all pending in ONE transaction).
+  // Expand/contract relies on it: with a single transaction the ACCESS EXCLUSIVE lock taken
+  // by an earlier migration (e.g. ADD CONSTRAINT ... NOT VALID) would be held while a later
+  // one scans the table (VALIDATE CONSTRAINT), defeating the split. Trade-off: if a later
+  // migration fails, earlier ones stay applied — rerun after fixing the cause.
+  singleTransaction: false,
   // Advisory lock: two concurrent runners (e.g. two deploy jobs) cannot migrate at once.
   advisoryLockMode: "fail",
 };
