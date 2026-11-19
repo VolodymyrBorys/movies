@@ -7,7 +7,7 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ## 2026-11-19 · Drill 1, PG pool crash fix, 1M seed, keyset EXPLAIN
 
-Commits `fc746c4` … `67cd8ac` on `master` (local; push by the owner).
+Commits `fc746c4` … `6035565` on `master` (`fc746c4`, `750150b` pushed by the owner; the rest local until `git push`).
 
 ### Gap from the previous log
 - 2026-11-17, after session 2 (not logged then): Grafana dashboard validated under load
@@ -36,6 +36,12 @@ Commits `fc746c4` … `67cd8ac` on `master` (local; push by the owner).
 - Seed: deterministic md5 ids (idempotent, exact rollback), inserted in `created_at` order
   (realistic `correlation`), `created_at` ties, cache invalidated via an outbox row,
   `VACUUM (ANALYZE)` at the end. psql only (pgAdmin wraps scripts in a transaction).
+
+### Files
+- Created: `src/infrastructure/postgres.test.ts`, `scripts/seed-movies.sql`, `docs/progress/postgres.md`.
+- Modified: `src/infrastructure/postgres.ts`, `package.json` (scripts `obs:up`, `obs:down`),
+  `docs/progress/observability.md`, `docs/learning-roadmap.md`, `CLAUDE.md`, `.gitignore`
+  (owner's edit), `docs/session-log.md`. Restored: `observability/env.example`.
 
 ### Verification
 - Assistant: `npx tsc -p .` exit 0; unit tests 127/127; two mutation checks on the pool fix.

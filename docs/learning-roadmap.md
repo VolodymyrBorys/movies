@@ -1,10 +1,10 @@
 # Learning Roadmap — Movies Production-Engineering Lab
 
 _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` exit 0, `npm test` 70/70 passed._
-_Last updated: 2026-11-17 · HEAD `d23b24a` · Session notes: `docs/session-log.md`._
+_Last updated: 2026-11-19 · HEAD `6035565` · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
 
-**Current phase: P1 (in progress).** Next task: the remaining P1 alert drills (see Phase 1 → Status), then start P2.
+**Current phase: P1 (in progress); P0 done except optional items.** Next task: P1 drill 2 (Redis stopped + PATCH → `OutboxBacklogTooOld`), then drill 3 (PostgreSQL stopped), the replica decision + replica-lag alert, then start P2.
 
 ---
 
@@ -91,7 +91,7 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | Express 5 app, `helmet`, `x-powered-by` disabled, JSON body limit 1 MB, JSON 404, central `errorHandler`                                                                                  | `src/app.ts`, `src/utils/errors.ts`                                   |
 | pino + pino-http, `requestId` (UUID) in logs and `x-request-id` header, header redaction                                                                                                  | `src/app.ts`, `src/infrastructure/logger.ts`                          |
-| PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release | `src/infrastructure/postgres.ts`                                      |
+| PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release; `error` listener on both pools (idle client loss no longer crashes the process, 2026-11-19) | `src/infrastructure/postgres.ts`                                      |
 | Zod fail-fast env config: PostgreSQL, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` (only `PG_*` required); production requires `PG_SSL=verify-full`                                   | `src/config/env.ts`                                                   |
 | Keyset pagination on `(created_at, id)` over `movies` (uuid ids), microsecond-precision opaque cursor, `limit + 1` for `hasMore`                                                         | `src/modules/movies/movies.repository.ts`, `cursor.ts`                |
 | SQL migrations (node-pg-migrate): baseline of `movies` + `cache_invalidation_outbox`; runner on primary with `lock_timeout`, advisory lock, `--fake`/`--dry-run`                         | `migrations/`, `scripts/migrate.ts`                                   |
@@ -106,6 +106,7 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 | Alert drill watcher (read-only): Prometheus alert transitions + `/readyz`                                                                                                                 | `scripts/watch-alerts.ts`                                             |
 | RAG pipeline (embed → Qdrant search → bounded context → Gemini generate), cancellation, retry only in generation, 70 unit tests                                                           | `src/modules/rag/`, see `docs/progress/rag.md`                        |
 | Hand-written HTTP load test (concurrency, p50/p95/p99, status counts)                                                                                                                     | `scripts/load-test.ts`                                                |
+| Seed: 1M synthetic movies, deterministic/idempotent/reversible (loaded into the app DB, 2026-11-19)                                                                                      | `scripts/seed-movies.sql`, `docs/progress/postgres.md`                |
 
 ### 4.2 Partially implemented / known gaps
 
@@ -202,12 +203,14 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - ✅ 11 alert rules with severity + runbook; `promtool test rules` → SUCCESS (owner, 2026-11-17).
 - ✅ Drill "Redis stopped": `RedisDown` fired after 62 s, `CacheErrors` after 300 s, `/readyz` stayed 200 with `redis=down`, no false 5xx alerts.
 - ✅ Finding fixed: `PostgresDown` false positive = exporter pointed at a non-existent DB (`PG_EXPORTER_DATABASE`); resolved after fix.
-- ⏳ Drills not done yet: app stopped (`MoviesApiDown`), Redis stopped + PATCH (`OutboxBacklogTooOld`), PostgreSQL stopped (`PostgresDown` real case), `HighErrorRatio`/`HighLatencyP99` (better with P2 load).
+- ✅ Drill "app stopped" (owner, 2026-11-19): `MoviesApiDown` firing ~70–75 s after stop, resolved ~10 s after restart, no other alerts. Not checked: Targets error text, no false alerts after restart, variants 1b (shutdown-delay 503 window) / 1c (`kill -STOP`).
+- ✅ Finding fixed (2026-11-19): a PostgreSQL stop **crashed the app** (no `error` listener on pg pools). Fix + regression test; re-checked live with `pg_terminate_backend`. Drill log in `docs/progress/observability.md`.
+- ⏳ Drills not done yet: Redis stopped + PATCH (`OutboxBacklogTooOld`), PostgreSQL stopped (`PostgresDown` real case; first choose the stop method — `brew services stop` ended in "unexpected postmaster exit", not a clean fast shutdown), `HighErrorRatio`/`HighLatencyP99` (better with P2 load).
 - ✅ Grafana dashboard validated under traffic (`scripts/load-test.ts` + PATCHes, owner, 2026-11-17); evictions query and outbox `increase()` panel added afterwards (not yet re-checked).
 - ✅ `promtool check config` SUCCESS (assistant, local promtool 3.15.0; rule-file glob is a container path, rules checked separately) and `amtool check-config` SUCCESS (owner, `prom/alertmanager:v0.28.1`: global, route, 1 receiver), 2026-11-17.
 - ✅ SLOs for `GET /v1/movies` (availability 99.5%, latency 99% ≤ 250 ms, 30d) with multi-window burn-rate alerts (fast 14.4×/6×, slow 1×), recording rules, traffic guards; `promtool check rules` + `test rules` SUCCESS (assistant, local promtool 3.15.0, 2026-11-17). Not yet observed firing live.
 - ✅ Label-cardinality review by code (2026-11-17): all labels bounded; fixed `route` taking the client's casing from `req.baseUrl` (`/V1/movies` escaped SLO/alerts), regression tests passed (owner). Live check (owner): 2437 series total, app labels clean; client-set `application_name` in postgres_exporter (pgAdmin includes connection IDs) noted and accepted.
-- ⏳ Not started: replica-lag alert. **Correction (owner, 2026-11-17): a local replica of the movies DB exists.** Still to check: replication type (streaming/logical), whether the app uses it (`PG_REPLICA_*` set), and how to scrape lag (no exporter targets the replica yet; `pg_stat_replication` on the primary vs `pg_last_xact_replay_timestamp()` on the replica).
+- ⏳ Not started: replica-lag alert. **Correction (owner, 2026-11-17): a local replica of the movies DB exists.** **The app does not use it** (2026-11-19: read pool connects as `movies-api:primary` → `PG_REPLICA_*` unset); decide first whether it should (enables stale reads after PATCH). Still to check: replication type (streaming/logical) and how to scrape lag (no exporter targets the replica yet; `pg_stat_replication` on the primary vs `pg_last_xact_replay_timestamp()` on the replica).
 - ⏸ Deferred (owner, 2026-11-17), to do later:
   - **Watchdog / dead-man's switch:** an always-firing alert routed to an external heartbeat receiver, so a dead Prometheus/Alertmanager pipeline is noticed (today nothing watches the monitoring itself).
   - **Inhibition rules** in Alertmanager: e.g. `PostgresDown` suppresses derived alerts (`HighErrorRatio`, SLO burn, `OutboxBacklogStale`); `MoviesApiDown` suppresses app-metric alerts. Prove with `amtool` + a drill.
@@ -266,6 +269,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 **Scope / exercises.**
 
 - `EXPLAIN (ANALYZE, BUFFERS)`: keyset vs `OFFSET` at deep pages; index-only scans; effect of `VACUUM`/visibility map.
+- Findings from the 1M seed (2026-11-19, `docs/progress/postgres.md`): `movies_created_at_id_idx` ~52% full (inserts at the left edge of a `DESC` index) → compare `ASC` index / `REINDEX` / `pgstatindex`; `n_distinct(created_at)` estimated 0.74 vs actual 0.98 → `SET STATISTICS`; check `shared_buffers` vs working set.
 - Outbox table health: partial index `WHERE processed_at IS NULL AND dead_lettered_at IS NULL`, dead-tuple growth under load, retention/cleanup job for processed rows, autovacuum tuning.
 - Concurrency: reproduce a lost update with two concurrent PATCHes; implement optimistic concurrency (`If-Match` / `version` check → 409). Compare with `SELECT ... FOR UPDATE`.
 - Isolation levels: demonstrate a write-skew anomaly under Read Committed vs Serializable (with retry on `40001`, bounded).
@@ -490,7 +494,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
 | Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | first plan recorded (keyset vs OFFSET, 1M rows, 2026-11-19); P3 |
 | Messaging          | real broker, kill/crash drills                 | At-least-once, idempotency, DLQ                 | P5                |
-| Observability      | `promtool test rules`, drills via `scripts/watch-alerts.ts` | Alerts fire and resolve           | P1 (rule tests pass; 1 of ~5 drills done), P6 |
+| Observability      | `promtool test rules`, drills via `scripts/watch-alerts.ts` | Alerts fire and resolve           | P1 (rule tests pass; 2 of ~5 drills done), P6 |
 | AI evals           | golden sets, fixtures, live runs               | Retrieval/agent quality over time               | P7, P8            |
 | Infra              | `terraform validate/plan`, manifest validation | Infra changes reviewed before apply             | P9–P11            |
 
