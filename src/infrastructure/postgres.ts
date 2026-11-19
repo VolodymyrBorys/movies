@@ -60,6 +60,28 @@ export const pgOptionsReplica: PoolConfig = pg.replica
 
 export type MovieSort = "asc" | "desc";
 
+/**
+ * node-postgres emits "error" on the pool when an IDLE client loses its connection
+ * (PostgreSQL restart, pg_terminate_backend, network drop). With no listener, EventEmitter
+ * throws → uncaught exception → the whole process exits (seen in a drill, 2026-11-19).
+ * The pool has already discarded that client; the next query opens a new connection.
+ * Errors on clients in use reach the query/transaction caller instead.
+ *
+ * Logs code + message only: pg-pool sets `err.client`, and pino's err serializer would
+ * copy that Client — including its password — into the log.
+ */
+function handleIdleClientErrors(pool: Pool, name: "write" | "read"): void {
+  pool.on("error", (error: Error) => {
+    const code =
+      "code" in error && typeof error.code === "string" ? error.code : undefined;
+
+    logger.error(
+      { pool: name, code, message: error.message },
+      "Idle PostgreSQL client failed; client discarded from pool",
+    );
+  });
+}
+
 export class PgService {
   private writePool!: Pool;
   private readPool!: Pool;
@@ -67,6 +89,8 @@ export class PgService {
   async start(): Promise<void> {
     this.writePool = new Pool(pgOptionsMaster);
     this.readPool = new Pool(pgOptionsReplica);
+    handleIdleClientErrors(this.writePool, "write");
+    handleIdleClientErrors(this.readPool, "read");
     await this.writePool.query("select 1 + 1");
     await this.readPool.query("select 1 + 1");
     logger.info("PostgreSQL connected");
