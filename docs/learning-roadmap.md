@@ -1,10 +1,10 @@
 # Learning Roadmap — Movies Production-Engineering Lab
 
 _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` exit 0, `npm test` 70/70 passed._
-_Last updated: 2026-11-19 · HEAD `6035565` · Session notes: `docs/session-log.md`._
+_Last updated: 2026-11-19 · HEAD `0a92c75` (branch `p3-movies-crud`) · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
 
-**Current phase: P1 (in progress); P0 done except optional items.** Next task: P1 drill 2 (Redis stopped + PATCH → `OutboxBacklogTooOld`), then drill 3 (PostgreSQL stopped), the replica decision + replica-lag alert, then start P2.
+**Current phase: P1 (in progress; drills 2–3 and replica deferred by the owner); P0 done except optional items; Phase 3 "C" block done early (CRUD + optimistic concurrency, 2026-11-19).** Order decided by the owner (2026-11-19): **D** — P7 RAG endpoint + synchronous movie review → **B** — P2 k6 baseline → **P5** RabbitMQ (async review worker).
 
 ---
 
@@ -94,7 +94,10 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 | PostgreSQL write/read pool split; optional replica (falls back to primary); `statement_timeout`, connect timeout, `application_name` per role; transaction helper with rollback + release; `error` listener on both pools (idle client loss no longer crashes the process, 2026-11-19) | `src/infrastructure/postgres.ts`                                      |
 | Zod fail-fast env config: PostgreSQL, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` (only `PG_*` required); production requires `PG_SSL=verify-full`                                   | `src/config/env.ts`                                                   |
 | Keyset pagination on `(created_at, id)` over `movies` (uuid ids), microsecond-precision opaque cursor, `limit + 1` for `hasMore`                                                         | `src/modules/movies/movies.repository.ts`, `cursor.ts`                |
-| SQL migrations (node-pg-migrate): baseline of `movies` + `cache_invalidation_outbox`; runner on primary with `lock_timeout`, advisory lock, `--fake`/`--dry-run`                         | `migrations/`, `scripts/migrate.ts`                                   |
+| SQL migrations (node-pg-migrate): baseline of `movies` + `cache_invalidation_outbox`; runner on primary with `lock_timeout`, advisory lock, `--fake`/`--dry-run`; expand/contract: status/version NOT NULL (backfill + CHECK NOT VALID → VALIDATE → SET NOT NULL without scan, DEBUG1-proven on PG 18); one transaction per migration (`singleTransaction: false`) | `migrations/`, `scripts/migrate.ts`                                   |
+| Movies CRUD: `POST /v1/movies` (201 + `Location`, Zod mirrors DB constraints, `.strict()`), `GET /v1/movies/:id` (primary read: read-after-write), `PATCH`, `DELETE` (204); every mutation + outbox row in one transaction | `src/routes/movies.ts`, `src/modules/movies/`                          |
+| Optimistic concurrency: strong `ETag: "<version>"`, `If-Match` → 412 (compare-and-set in one `UPDATE`), optional header, `*` = must exist; 304 on `If-None-Match` (Express) | `src/modules/movies/etag.ts`, `movies.repository.ts`                  |
+| One API date format: RFC 3339 UTC with microseconds, formatted in SQL (`CREATED_AT_UTC_SQL`), shared by responses and the cursor | `movies.repository.ts`                                                |
 | Probes: `/healthz` (liveness, no deps), `/readyz` (503 on shutdown or PG pool failure; Redis reported only)                                                                               | `src/routes/health.ts`, `src/infrastructure/health.ts`                |
 | Redis list cache with version key `movies:list:version`, TTL 60 s + jitter, `SET NX` version init, PG fallback on cache read failure, cache write failure doesn't fail GET                | `src/modules/movies/movies.service.ts`, `src/infrastructure/redis.ts` |
 | Redis client: 1 s command timeout, offline queue disabled, reconnect with exponential backoff + jitter, keepalive, ping                                                                   | `src/infrastructure/redis.ts`                                         |
@@ -115,9 +118,10 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 | ~~`GET /v1/movies` validation wiring / code vs DB schema mismatch~~ — **fixed 2026-11-16** (`5f555c0`)   | Query validation wired, keyset on `(created_at, id)` over `movies` (uuid ids); `PATCH` validates uuid. `src/routes/movies.test.ts` passed when run by the owner on 2026-11-16 (supertest needs local port binding — blocked in the assistant sandbox). | Real-DB check: integration tests passed (owner, 2026-11-17).                               |
 | ~~Integration tests written but never run~~ — **passed 14/14 on first run (owner, 2026-11-17)**          | `npm run test:integration` (`src/**/*.int.test.ts`, `src/test/`): keyset boundaries, cache staleness, outbox atomicity, worker SKIP LOCKED/retry/dead-letter/lease, `/readyz`. Needs `createdb movies_test` (migrations applied by globalSetup) + Redis db 15. | No mutation check was done for these tests (owner decision).                               |
 | ~~Probe HTTP tests not confirmed~~ — **`npm test` passed in full (owner, 2026-11-17)**, incl. `src/routes/health.test.ts` | —                                                                                                                                                                                                                                  | —                                                                                          |
-| `movies.status` / `movies.version` are nullable                                                          | Baseline migration mirrors the DB as is; `version + 1` on NULL stays NULL.                                                                                                                                                         | Tighten with a later migration (P3, together with optimistic concurrency).                 |
-| DELETE and CREATE not exposed                                                                            | `deleteMovie` exists in controller/service/repository but has no route; `validation/create-movie.ts` has no route or repository method.                                                                                            | Write path only via `PATCH`.                                                               |
-| Optimistic concurrency is half-done                                                                      | `version = version + 1` on update, but no `WHERE version = $expected` / `If-Match`.                                                                                                                                                | Lost updates are possible; good Phase 3 exercise.                                          |
+| ~~`movies.status` / `movies.version` are nullable~~ — **fixed 2026-11-19** (`2ff81c0`)                  | Expand/contract migrations; backfill `NULL` → `'draft'`/`1`.                                                                                                                                                                       | —                                                                                          |
+| ~~DELETE and CREATE not exposed~~ — **fixed 2026-11-19** (`a46140a`, `b330338`)                         | —                                                                                                                                                                                                                                  | —                                                                                          |
+| ~~Optimistic concurrency is half-done~~ — **fixed 2026-11-19** (`0a92c75`)                               | —                                                                                                                                                                                                                                  | —                                                                                          |
+| Optimistic concurrency limits                                                                            | `If-Match` optional; 404 (not RFC 412) for a missing id with `If-Match`; a direct SQL `UPDATE` without `version + 1` keeps the old ETag; `POST` not idempotent (no `Idempotency-Key`).                                            | Clients without `If-Match` can still lose updates; make it required (428) once clients migrate; trigger for version bump; idempotency with edge retries (P10). |
 | Config centralization (RAG only)                                                                         | PG, Redis, `PORT`, `LOG_LEVEL`, `SHUTDOWN_DELAY_MS` are in `env.ts` (2026-11-16). Qdrant/Gemini clients and RAG scripts still call `loadEnvFile` and read `process.env`; `QDRANT_URL!` unvalidated.                             | RAG cannot be configured the same way as the API.                                          |
 | Logging consistency (RAG only)                                                                           | Non-RAG code uses the pino logger (2026-11-16). `console.*` remains in RAG generation/collection services. Service-level logs have no `requestId` (no request context).                                                          | RAG logs are unstructured; correlation needs P6.                                           |
 | Error model                                                                                              | `AppError` exists; movies service has its own `InvalidMoviesQueryError`; RAG uses plain `Error`.                                                                                                                                   | Inconsistent HTTP mapping.                                                                 |
@@ -271,11 +275,11 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - `EXPLAIN (ANALYZE, BUFFERS)`: keyset vs `OFFSET` at deep pages; index-only scans; effect of `VACUUM`/visibility map.
 - Findings from the 1M seed (2026-11-19, `docs/progress/postgres.md`): `movies_created_at_id_idx` ~52% full (inserts at the left edge of a `DESC` index) → compare `ASC` index / `REINDEX` / `pgstatindex`; `n_distinct(created_at)` estimated 0.74 vs actual 0.98 → `SET STATISTICS`; check `shared_buffers` vs working set.
 - Outbox table health: partial index `WHERE processed_at IS NULL AND dead_lettered_at IS NULL`, dead-tuple growth under load, retention/cleanup job for processed rows, autovacuum tuning.
-- Concurrency: reproduce a lost update with two concurrent PATCHes; implement optimistic concurrency (`If-Match` / `version` check → 409). Compare with `SELECT ... FOR UPDATE`.
+- ✅ (2026-11-19) Concurrency: lost update reproduced (integration test) and fixed with `If-Match`/ETag → 412; 8 concurrent writers → 1×200 + 7×412. Remaining: compare with `SELECT ... FOR UPDATE`.
 - Isolation levels: demonstrate a write-skew anomaly under Read Committed vs Serializable (with retry on `40001`, bounded).
 - Replica lag: pause replay (`pg_wal_replay_pause()`), PATCH, then GET → observe stale read; decide which endpoints need `strong` consistency (repository already has the parameter).
 - Pool exhaustion and `statement_timeout`: observe `pg_stat_activity`, `wait_event`, lock waits.
-- Online migration: add a column/index without blocking (`CREATE INDEX CONCURRENTLY`, expand/contract), compatible with the running app version.
+- ◐ Online migration: add a column/index without blocking (`CREATE INDEX CONCURRENTLY`, expand/contract), compatible with the running app version. Expand/contract NOT NULL done (C4, 2026-11-19); `CREATE INDEX CONCURRENTLY` remains.
 - **PgBouncer (only if P2 proves the need).** Trigger: several app instances push server connections toward `max_connections`, or `pg_pool_connections{state="waiting"}` stays > 0 (P1 metrics + `postgres_exporter`). Experiment: transaction pooling in front of the primary; measure connections, p99 and throughput before/after. Known breakages to handle first:
   - `statement_timeout` is passed as startup `options` → rejected by PgBouncer; `ignore_startup_parameters = options` would silently drop it. Move it to `ALTER ROLE … SET statement_timeout`.
   - Migrations (node-pg-migrate session advisory lock) must connect directly to PostgreSQL, bypassing PgBouncer.
@@ -315,6 +319,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 
 1. Domain events (`movie.updated`, `movie.deleted`) fanned out to cache invalidation and future consumers.
 2. **Document ingestion for RAG**: embedding is slow, billable and rate-limited → a queue with prefetch, retries and DLQ is a natural fit.
+3. **Movie review generation (Gemini)**: slow, billable, rate-limited → `202` + job, prefetch as rate limit, DLX on 503, idempotent regeneration (owner decision, 2026-11-19).
 
 **Prerequisites.** P0, P1 (P3 helpful for outbox internals).
 
@@ -383,6 +388,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - Prompt-injection hardening of the context block (escaping/delimiters), documented threat model.
 - Ingestion via queue (P5) with idempotent upserts (deterministic point IDs).
 - Cost controls: per-request token budget, rate limiting.
+- Synchronous `POST /v1/movies/:id/review` (Gemini): measure latency, timeouts, 503 behavior — the evidence that motivates the async version in P5 (owner decision, 2026-11-19).
 
 **Exercises.** Change chunk size → re-index → re-run eval; Gemini 503 storm → behavior and alerting; cancellation under load.
 
@@ -486,10 +492,10 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | Level              | Tooling                                        | What it proves                                  | Introduced        |
 | ------------------ | ---------------------------------------------- | ----------------------------------------------- | ----------------- |
 | Typecheck          | `npx tsc -p .`                                 | Types/contracts compile under strict settings   | exists            |
-| Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists: RAG, cursor, config, readiness, metrics (124 tests, 2026-11-17) |
-| HTTP (mocked deps) | Vitest + `supertest`, PG/Redis mocked          | Routing, validation, controller → repository    | exists (`src/routes/*.test.ts`; needs local port; passed, owner 2026-11-17) |
-| Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | exists, 14/14 passed (owner, 2026-11-17) |
-| Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16) |
+| Unit               | Vitest, external I/O via `vi.mock`             | Logic of a single module                        | exists: RAG, cursor, config, readiness, metrics, ETag (142 tests, assistant, 2026-11-19) |
+| HTTP (mocked deps) | Vitest + `supertest`, PG/Redis mocked          | Routing, validation, controller → repository    | exists (`src/routes/*.test.ts`; needs local port; `movies.test.ts` 50/50, owner 2026-11-19) |
+| Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | exists, 36/36 passed (owner, 2026-11-19) |
+| Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16); expand/contract on 1M rows (nebula, owner, 2026-11-19) |
 | Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
 | Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
 | Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | first plan recorded (keyset vs OFFSET, 1M rows, 2026-11-19); P3 |

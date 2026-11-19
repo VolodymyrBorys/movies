@@ -5,6 +5,51 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-19 (session 2) · Block C: movies CRUD + optimistic concurrency
+
+Branch `p3-movies-crud`: `a46140a` … `0a92c75`, merged into `master` (not pushed).
+
+### Worked on / completed
+- Order agreed with the owner: C → D (RAG endpoint + sync review) → B (P2) → P5 RabbitMQ.
+  RabbitMQ deliberately needs a "manufactured" use case: async AI review generation.
+- C1 `DELETE /v1/movies/:id` → 204. C2 `POST /v1/movies` → 201 + Location (durationMinutes was
+  missing from the old schema). C3 `GET /v1/movies/:id` (primary). C4 status/version NOT NULL
+  (expand/contract). C5 ETag / If-Match → 412.
+- One date format: RFC 3339 UTC, microseconds, formatted in SQL (responses = cursor).
+
+### Key decisions (why)
+- GET by id reads the primary: POST → Location → GET and GET → ETag → PATCH are
+  read-after-write; a replica would give false 404/412 (CLAUDE.md rule).
+- Compare-and-set inside the UPDATE (`version = ANY($3)`): READ COMMITTED re-checks the
+  predicate after the row lock (EvalPlanQual); read-compare-write in JS would race.
+- `If-Match` optional for now (backward compatible); 404 instead of RFC's 412 for a missing id.
+- `singleTransaction: false`: with the library default, the expand lock would be held during
+  the contract scan. SET NOT NULL and DROP CONSTRAINT in separate statements (DROP runs first
+  within one ALTER TABLE).
+- Express default weak ETag on JSON bodies kept (list keeps 304); harmless for If-Match.
+
+### Verification
+- Assistant: `npx tsc -p .` exit 0; unit tests 142/142 (incl. `etag.test.ts`, 15).
+- Owner: `movies.test.ts` 50/50; `npm run test:integration` 36/36; migrations on nebula (1M):
+  DEBUG1 "existing constraints … sufficient to prove …" on PG 18, 0 NULL rows.
+- Not run: mutation check of the If-Match predicate (suggested, optional).
+
+### Known issues / findings
+- `guard-files.sh` blocks edits to new, uncommitted migrations (owner deleted + recreated);
+  could be narrowed to `git ls-files migrations/`.
+- Assistant twice predicted wrong test counts (miscounted the baseline).
+- `MovieRow` type is inaccurate (`release_year: string`); untouched.
+
+### Next steps (in order)
+1. `git push` (owner); delete merged branch `p3-movies-crud` (and old merged
+   `p0-health-config`, `p1-observability`).
+2. D: P7 — RAG HTTP endpoint + synchronous `POST /v1/movies/:id/review`; plan first
+   (Gemini is billable → approval for live runs).
+3. B: P2 k6 baseline (k6 install → approval). 4. P5 RabbitMQ.
+5. Deferred: P1 drills 2–3, replica decision + lag alert.
+
+---
+
 ## 2026-11-19 · Drill 1, PG pool crash fix, 1M seed, keyset EXPLAIN
 
 Commits `fc746c4` … `6035565` on `master` (`fc746c4`, `750150b` pushed by the owner; the rest local until `git push`).
