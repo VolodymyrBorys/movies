@@ -256,6 +256,68 @@ describe("PATCH /v1/movies/:id", () => {
   });
 });
 
+describe("DELETE /v1/movies/:id", () => {
+  function fakeTransaction(deleted: unknown[]) {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) =>
+      /DELETE FROM movies/.test(sql) ? { rows: deleted } : { rows: [] },
+    );
+    transaction.mockImplementation(async (callback) =>
+      callback({ query } as never),
+    );
+    return query;
+  }
+
+  it("rejects a non-uuid id with 400 and does not hit storage", async () => {
+    const res = await request(app).delete("/v1/movies/42");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("deletes the movie, enqueues invalidation in the same transaction, returns 204", async () => {
+    const query = fakeTransaction([{ id: ID1 }]);
+
+    const res = await request(app).delete(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(204);
+    expect(res.text).toBe("");
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]![0]).toMatch(/DELETE FROM movies\b/);
+    expect(query.mock.calls[0]![1]).toEqual([ID1]);
+    expect(query.mock.calls[1]![0]).toMatch(/INSERT INTO cache_invalidation_outbox/);
+    expect(query.mock.calls[1]![1]).toEqual([
+      "movie",
+      ID1,
+      "movies.list.invalidate",
+    ]);
+    // Best-effort immediate invalidation runs only after the transaction resolved.
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("still returns 204 when the immediate cache invalidation fails (outbox retries)", async () => {
+    fakeTransaction([{ id: ID1 }]);
+    invalidate.mockRejectedValue(new Error("redis down"));
+
+    const res = await request(app).delete(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(204);
+  });
+
+  it("returns 404 and enqueues nothing when the movie does not exist", async () => {
+    const query = fakeTransaction([]);
+
+    const res = await request(app).delete(`/v1/movies/${ID1}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
 describe("HTTP metrics route label", () => {
   // Express matches paths case-insensitively and req.baseUrl keeps the client's casing.
   // Regression: `/V1/movies` must be counted as route="/v1/movies", otherwise SLO rules and

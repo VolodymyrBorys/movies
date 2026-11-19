@@ -48,5 +48,5 @@ export const deleteMovie = async (_req: Request, res: Response) => {
     return;
   }
 
-  res.status(200).json({ msg: "movie is deleted" });
+  res.status(204).end();
 };

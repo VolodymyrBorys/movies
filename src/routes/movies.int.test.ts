@@ -182,6 +182,76 @@ describe("PATCH /v1/movies/:id (real PostgreSQL)", () => {
   });
 });
 
+describe("DELETE /v1/movies/:id (real PostgreSQL)", () => {
+  async function movieExists(id: string) {
+    const { rows } = await PG.writeQuery("SELECT 1 FROM movies WHERE id = $1", [id]);
+    return rows.length === 1;
+  }
+
+  it("deletes the movie and writes the outbox event", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    const res = await request(app).delete(`/v1/movies/${id}`);
+
+    expect(res.status).toBe(204);
+    expect(await movieExists(id)).toBe(false);
+
+    const outbox = await outboxRows();
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({
+      aggregate_type: "movie",
+      aggregate_id: id,
+      event_type: "movies.list.invalidate",
+      attempts: 0,
+      processed_at: null,
+    });
+  });
+
+  it("removes the movie from the list after a cached read", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    const before = await request(app).get("/v1/movies");
+    expect(before.body.data.map((m: { id: string }) => m.id)).toEqual([id]);
+
+    expect((await request(app).delete(`/v1/movies/${id}`)).status).toBe(204);
+
+    // Immediate best-effort invalidation bumped the list version.
+    const after = await request(app).get("/v1/movies");
+    expect(after.body.data).toEqual([]);
+  });
+
+  it("rolls back the delete when the outbox insert fails (atomicity)", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    await PG.writeQuery(
+      `ALTER TABLE cache_invalidation_outbox
+         ADD CONSTRAINT it_reject_events CHECK (event_type <> 'movies.list.invalidate') NOT VALID`,
+    );
+
+    try {
+      const res = await request(app).delete(`/v1/movies/${id}`);
+      expect(res.status).toBe(500);
+    } finally {
+      await PG.writeQuery(
+        "ALTER TABLE cache_invalidation_outbox DROP CONSTRAINT it_reject_events",
+      );
+    }
+
+    expect(await movieExists(id)).toBe(true);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it("returns 404 on a second delete and writes no extra outbox event", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    expect((await request(app).delete(`/v1/movies/${id}`)).status).toBe(204);
+    const second = await request(app).delete(`/v1/movies/${id}`);
+
+    expect(second.status).toBe(404);
+    expect(await outboxRows()).toHaveLength(1);
+  });
+});
+
 describe("GET /readyz (real dependencies)", () => {
   it("reports ready with all checks up", async () => {
     const res = await request(app).get("/readyz");

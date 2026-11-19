@@ -5,7 +5,11 @@ import { PG } from "../infrastructure/postgres.ts";
 import { asyncHandler } from "../utils/errors.ts";
 import { validate } from "../utils/validate-query.ts";
 import { getMoviesQuerySchema } from "../modules/movies/validation/get-movies.ts";
-import { getMovies, updateMovie } from "../modules/movies/movies.controller.ts";
+import {
+  deleteMovie,
+  getMovies,
+  updateMovie,
+} from "../modules/movies/movies.controller.ts";
 import {
   updateMovieBodySchema,
   updateMovieParamsSchema,
@@ -24,4 +28,10 @@ router.patch(
   validate("params", updateMovieParamsSchema),
   validate("body", updateMovieBodySchema),
   asyncHandler(updateMovie),
+);
+
+router.delete(
+  "/movies/:id",
+  validate("params", updateMovieParamsSchema),
+  asyncHandler(deleteMovie),
 );
