@@ -7,7 +7,11 @@ import {
   encodeMovieCursor,
   type MovieCursor,
 } from "./cursor.ts";
-import { moviesRepository } from "./movies.repository.ts";
+import {
+  moviesRepository,
+  type UpdateMovieResult,
+} from "./movies.repository.ts";
+import type { IfMatch } from "./etag.ts";
 import type { MovieDetailsRow } from "../../models/movies.ts";
 import type { CreateMovieBody } from "./validation/create-movie.ts";
 
@@ -133,11 +137,22 @@ export class MovieService {
     return movie;
   }
 
-  async updateMovie(id: string, body: { status: string }) {
-    const movie = await moviesRepository.updateMovie(id, body.status);
+  async updateMovie(
+    id: string,
+    body: { status: string },
+    ifMatch: IfMatch | null,
+  ): Promise<UpdateMovieResult> {
+    // "*" only requires the movie to exist — same as no precondition for an UPDATE by id.
+    const expectedVersions = ifMatch?.kind === "versions" ? ifMatch.versions : null;
 
-    if (!movie) {
-      return null;
+    const result = await moviesRepository.updateMovie(
+      id,
+      body.status,
+      expectedVersions,
+    );
+
+    if (result.kind !== "updated") {
+      return result;
     }
 
     // Best effort: зменшує звичайне вікно застарілого кешу.
@@ -151,6 +166,6 @@ export class MovieService {
       );
     }
 
-    return movie;
+    return result;
   }
 }

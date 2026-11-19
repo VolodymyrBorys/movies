@@ -405,6 +405,97 @@ describe("DELETE /v1/movies/:id (real PostgreSQL)", () => {
   });
 });
 
+describe("PATCH /v1/movies/:id optimistic concurrency (real PostgreSQL)", () => {
+  async function currentRow(id: string) {
+    const { rows } = await PG.writeQuery<{ status: string; version: number }>(
+      "SELECT status, version FROM movies WHERE id = $1",
+      [id],
+    );
+    return rows[0];
+  }
+
+  it("without If-Match two clients that read the same version both win: a lost update", async () => {
+    // Baseline the mechanism fixes — kept as a test so the problem stays visible.
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z", status: "draft", version: 1 });
+
+    // Both clients read version 1, then each writes its own decision.
+    const a = await request(app).patch(`/v1/movies/${id}`).send({ status: "published" });
+    const b = await request(app).patch(`/v1/movies/${id}`).send({ status: "archived" });
+
+    expect([a.status, b.status]).toEqual([200, 200]);
+    // A's change is silently overwritten; nobody was told.
+    expect(await currentRow(id)).toEqual({ status: "archived", version: 3 });
+  });
+
+  it("with If-Match the second writer gets 412 and the first write survives", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z", status: "draft", version: 1 });
+
+    const read = await request(app).get(`/v1/movies/${id}`);
+    expect(read.headers.etag).toBe('"1"');
+
+    const a = await request(app)
+      .patch(`/v1/movies/${id}`)
+      .set("If-Match", read.headers.etag!)
+      .send({ status: "published" });
+    const b = await request(app)
+      .patch(`/v1/movies/${id}`)
+      .set("If-Match", read.headers.etag!)
+      .send({ status: "archived" });
+
+    expect(a.status).toBe(200);
+    expect(a.headers.etag).toBe('"2"');
+    expect(b.status).toBe(412);
+    expect(await currentRow(id)).toEqual({ status: "published", version: 2 });
+    expect(await outboxRows()).toHaveLength(1); // the rejected write enqueued nothing
+  });
+
+  it("lets exactly one of N concurrent writers with the same ETag win", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z", status: "draft", version: 1 });
+
+    // Concurrent UPDATEs of one row serialize on the row lock; under READ COMMITTED each
+    // waiter re-checks `version = ANY(...)` against the winner's committed row → 0 rows.
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        request(app)
+          .patch(`/v1/movies/${id}`)
+          .set("If-Match", '"1"')
+          .send({ status: "published" }),
+      ),
+    );
+
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 412, 412, 412, 412, 412, 412, 412]);
+    expect(await currentRow(id)).toEqual({ status: "published", version: 2 });
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it("retries successfully after re-reading the new ETag", async () => {
+    const id = await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z", status: "draft", version: 1 });
+    await request(app).patch(`/v1/movies/${id}`).set("If-Match", '"1"').send({ status: "published" });
+
+    const stale = await request(app).patch(`/v1/movies/${id}`).set("If-Match", '"1"').send({ status: "archived" });
+    expect(stale.status).toBe(412);
+
+    const fresh = await request(app).get(`/v1/movies/${id}`);
+    const retry = await request(app)
+      .patch(`/v1/movies/${id}`)
+      .set("If-Match", fresh.headers.etag!)
+      .send({ status: "archived" });
+
+    expect(retry.status).toBe(200);
+    expect(await currentRow(id)).toEqual({ status: "archived", version: 3 });
+  });
+
+  it("returns 404 with If-Match for an unknown id", async () => {
+    const res = await request(app)
+      .patch("/v1/movies/11111111-1111-4111-8111-111111111111")
+      .set("If-Match", '"1"')
+      .send({ status: "published" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("movies status/version constraints (migrated schema)", () => {
   async function pgErrorOf(sql: string, params: unknown[] = []) {
     try {

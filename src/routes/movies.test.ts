@@ -202,9 +202,15 @@ describe("GET /v1/movies", () => {
 });
 
 describe("PATCH /v1/movies/:id", () => {
-  function fakeTransaction(updated: unknown[]) {
+  // `exists` = what the follow-up existence check (only run after a 0-row conditional
+  // UPDATE) returns.
+  function fakeTransaction(updated: unknown[], exists = false) {
     const query = vi.fn(async (sql: string, _params?: unknown[]) =>
-      /UPDATE movies/.test(sql) ? { rows: updated } : { rows: [] },
+      /UPDATE movies/.test(sql)
+        ? { rows: updated }
+        : /SELECT 1 FROM movies/.test(sql)
+          ? { rows: exists ? [{ "?column?": 1 }] : [] }
+          : { rows: [] },
     );
     transaction.mockImplementation(async (callback) =>
       callback({ query } as never),
@@ -242,11 +248,13 @@ describe("PATCH /v1/movies/:id", () => {
     expect(res.body).toEqual({
       data: { id: ID1, status: "published", version: 2 },
     });
+    expect(res.headers.etag).toBe('"2"');
 
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0]![0]).toMatch(/UPDATE movies\b/);
-    expect(query.mock.calls[0]![1]).toEqual([ID1, "published"]);
+    // No If-Match → no precondition (null expected versions).
+    expect(query.mock.calls[0]![1]).toEqual([ID1, "published", null]);
     expect(query.mock.calls[1]![0]).toMatch(/INSERT INTO cache_invalidation_outbox/);
     expect(query.mock.calls[1]![1]).toEqual([
       "movie",
@@ -265,6 +273,93 @@ describe("PATCH /v1/movies/:id", () => {
     expect(res.status).toBe(404);
     expect(query).toHaveBeenCalledTimes(1);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  describe("optimistic concurrency (If-Match)", () => {
+    it("applies the update when If-Match carries the current version", async () => {
+      const query = fakeTransaction([{ id: ID1, status: "published", version: 3 }]);
+
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", '"2"')
+        .send({ status: "published" });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.etag).toBe('"3"');
+      const [sql, params] = query.mock.calls[0]!;
+      // Compare-and-set inside the UPDATE itself, not a separate read.
+      expect(sql).toMatch(/AND \(\$3::int\[\] IS NULL OR version = ANY\(\$3::int\[\]\)\)/);
+      expect(params).toEqual([ID1, "published", [2]]);
+      expect(query.mock.calls[1]![0]).toMatch(/INSERT INTO cache_invalidation_outbox/);
+      expect(invalidate).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns 412, writes no outbox event and skips invalidation on a version mismatch", async () => {
+      const query = fakeTransaction([], true);
+
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", '"1"')
+        .send({ status: "published" });
+
+      expect(res.status).toBe(412);
+      expect(res.body.error.code).toBe("PRECONDITION_FAILED");
+      // No movie version tag on a 412: the client must re-read the resource, not reuse a tag
+      // from the error. (Express still adds its default weak body ETag, W/"len-hash", to any
+      // JSON response; a weak tag never matches If-Match, so it can't be misused.)
+      expect(res.headers.etag ?? "").not.toMatch(/^"\d+"$/);
+      expect(query.mock.calls.map(([sql]) => sql)).not.toContainEqual(
+        expect.stringMatching(/cache_invalidation_outbox/),
+      );
+      expect(invalidate).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 (not 412) when the movie does not exist", async () => {
+      fakeTransaction([], false);
+
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", '"1"')
+        .send({ status: "published" });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
+    });
+
+    it('treats "*" as "must exist" (no version check)', async () => {
+      const query = fakeTransaction([{ id: ID1, status: "published", version: 5 }]);
+
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", "*")
+        .send({ status: "published" });
+
+      expect(res.status).toBe(200);
+      expect(query.mock.calls[0]![1]).toEqual([ID1, "published", null]);
+    });
+
+    it("returns 412 for a weak tag (never matches under strong comparison)", async () => {
+      const query = fakeTransaction([], true);
+
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", 'W/"2"')
+        .send({ status: "published" });
+
+      expect(res.status).toBe(412);
+      expect(query.mock.calls[0]![1]).toEqual([ID1, "published", []]);
+    });
+
+    it("rejects a malformed If-Match with 400 before touching storage", async () => {
+      const res = await request(app)
+        .patch(`/v1/movies/${ID1}`)
+        .set("If-Match", "2")
+        .send({ status: "published" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(transaction).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -287,6 +382,7 @@ describe("GET /v1/movies/:id", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ data: movie });
+    expect(res.headers.etag).toBe('"3"');
 
     expect(writeQuery).toHaveBeenCalledTimes(1);
     expect(readQuery).not.toHaveBeenCalled();
@@ -294,6 +390,17 @@ describe("GET /v1/movies/:id", () => {
     expect(sql).toMatch(/FROM movies\s+WHERE id = \$1/);
     expect(sql).toMatch(/to_char\(created_at AT TIME ZONE 'UTC'.*\) AS created_at/);
     expect(params).toEqual([ID1]);
+  });
+
+  it("answers a matching If-None-Match with 304 and no body (conditional GET)", async () => {
+    writeQuery.mockResolvedValue({ rows: [movie] } as never);
+
+    const res = await request(app)
+      .get(`/v1/movies/${ID1}`)
+      .set("If-None-Match", '"3"');
+
+    expect(res.status).toBe(304);
+    expect(res.text).toBe("");
   });
 
   it("does not touch the list cache", async () => {
@@ -371,6 +478,7 @@ describe("POST /v1/movies", () => {
 
     expect(res.status).toBe(201);
     expect(res.headers.location).toBe(`/v1/movies/${ID1}`);
+    expect(res.headers.etag).toBe('"1"');
     expect(res.body).toEqual({
       data: {
         id: ID1,

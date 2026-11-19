@@ -45,7 +45,7 @@ describe("cache invalidation outbox worker", () => {
 
     // Repository only (no service): no best-effort immediate invalidation,
     // so the version change can only come from the worker.
-    await moviesRepository.updateMovie(id, "published");
+    await moviesRepository.updateMovie(id, "published", null);
 
     expect(await runCacheInvalidationBatch()).toBe(1);
 

@@ -27,6 +27,11 @@ const CREATED_AT_UTC_SQL = `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T
 
 const MOVIE_DETAILS_COLUMNS = `id, title, description, release_year, duration_minutes, ${CREATED_AT_UTC_SQL} AS created_at, status, version`;
 
+export type UpdateMovieResult =
+  | { kind: "updated"; movie: MovieRow }
+  | { kind: "not_found" }
+  | { kind: "version_mismatch" };
+
 export interface NewMovie {
   title: string;
   description: string | null;
@@ -157,28 +162,50 @@ class MoviesRepository {
     });
   }
 
-  async updateMovie(id: string, status: string): Promise<MovieRow | null> {
+  /**
+   * @param expectedVersions null = no precondition; otherwise the row must currently have
+   *   one of these versions (empty array never matches).
+   */
+  async updateMovie(
+    id: string,
+    status: string,
+    expectedVersions: number[] | null,
+  ): Promise<UpdateMovieResult> {
     return PG.transaction(async (client) => {
+      // Compare-and-set in ONE statement. Under READ COMMITTED a concurrent UPDATE of the
+      // same row makes this one wait for the row lock, then re-check the WHERE against the
+      // committed new version (EvalPlanQual): the loser sees version + 1 → 0 rows → 412.
+      // A separate SELECT version → compare in JS → UPDATE would race (both read "1").
       const result = await client.query<MovieRow>(
         `
           UPDATE movies
           SET status = $2,
               version = version + 1
           WHERE id = $1
+            AND ($3::int[] IS NULL OR version = ANY($3::int[]))
           RETURNING id, status, version
         `,
-        [id, status],
+        [id, status, expectedVersions],
       );
 
       const movie = result.rows[0];
 
-      if (!movie) {
-        return null;
+      if (movie) {
+        await this.enqueueListInvalidation(client, id);
+        return { kind: "updated", movie };
       }
 
-      await this.enqueueListInvalidation(client, id);
+      if (expectedVersions === null) {
+        return { kind: "not_found" };
+      }
 
-      return movie;
+      // 0 rows with a precondition: missing row or version mismatch — tell them apart.
+      // Nothing was written, so no outbox event either way.
+      const exists = await client.query("SELECT 1 FROM movies WHERE id = $1", [id]);
+
+      return exists.rows.length > 0
+        ? { kind: "version_mismatch" }
+        : { kind: "not_found" };
     });
   }
 
