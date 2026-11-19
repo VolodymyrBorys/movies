@@ -20,14 +20,16 @@ All ports bind to `127.0.0.1`. Containers reach the host via `host.docker.intern
 ```bash
 cp observability/env.example observability/.env        # once; fill in passwords (no empty values)
 
-# Always pass --env-file: depending on the Compose version, the implicit .env is read
+npm run obs:up      # docker compose ... up -d
+npm run obs:down    # docker compose ... down (keeps data volumes)
+
+# Both scripts pass --env-file: depending on the Compose version, the implicit .env is read
 # from the current directory, which from the repo root is the APP's .env.
+# For other compose commands use the same flags, e.g. via an alias:
 alias obs='docker compose -f observability/compose.yml --env-file observability/.env'
 
-obs up -d
 obs ps
 obs logs -f postgres-exporter redis-exporter
-obs down        # keeps data volumes
 ```
 
 Check required variables are set without printing them:
@@ -297,3 +299,27 @@ _(date · drill · fired after · resolved after · notes)_
   `rate(redis_evicted_keys_total)` on the right axis; outbox events panel switched from
   `rate()` (rare events looked like ~0) to `increase()` per non-overlapping 1m interval,
   bars, legend total.
+- 2026-11-19 · App stopped (Ctrl+C on `npm run dev`, graceful) · `/readyz` unreachable
+  first seen 16:50:37 (watcher polls every 5s, so the stop was 16:50:32–37) →
+  `MoviesApiDown` pending 16:50:46 → firing 16:51:47 (62s pending, ~70–75s end to end =
+  failed scrape + eval + `for: 1m`) · app restarted, `/readyz` 200 at 16:55:09 → resolved
+  16:55:19 (~10s, one scrape + eval) · no other alert seen in the watcher while the target
+  was down (app-metric alerts have no series → empty result). Not checked: Targets error
+  text, absence of false alerts 5–15 min after restart (counter reset), variants 1b
+  (shutdown delay window) and 1c (`kill -STOP`, hung process).
+- 2026-11-19 · finding, not a drill · **PostgreSQL restart crashed the app.**
+  `brew services stop` → `Unhandled 'error' event … terminating connection due to
+  unexpected postmaster exit` → process exit. Cause: no `error` listener on the pg pools;
+  node-postgres emits `error` on the pool when an idle client loses its connection, and an
+  unhandled EventEmitter `error` throws. Impact: any PG restart/failover kills every app
+  instance instead of making it not-ready (in K8s: restart loop instead of 503 from
+  `/readyz`). Fix: `handleIdleClientErrors()` in `src/infrastructure/postgres.ts` logs
+  pool/code/message only (pg-pool attaches `err.client`, which holds the password, and
+  pino's err serializer would log it) + regression test `postgres.test.ts` (mutation-checked).
+  Live re-check (owner): `pg_terminate_backend` on `application_name = 'movies-api:primary'`
+  → two log lines (`pool=write` and `pool=read`, `code=57P01`), no credentials, process kept
+  serving requests, `/readyz` → `ready` with both PG pools `up` (new connections opened). Side finding: the read pool also connects as `movies-api:primary` →
+  `PG_REPLICA_*` is not set, the app does not use the local replica.
+  Also: `brew services stop` ended with "unexpected postmaster exit" → not a clean fast
+  shutdown (hypothesis: launchd SIGTERM = smart shutdown, then SIGKILL); decide how to stop
+  PG before the `PostgresDown` drill.

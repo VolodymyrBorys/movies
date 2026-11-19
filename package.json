@@ -9,7 +9,9 @@
     "dev": "node --env-file-if-exists=.env --watch src/server.ts",
     "migrate:up": "node --env-file-if-exists=.env scripts/migrate.ts up",
     "migrate:down": "node --env-file-if-exists=.env scripts/migrate.ts down",
-    "migrate:create": "node-pg-migrate create --migrations-dir migrations --migration-file-language sql"
+    "migrate:create": "node-pg-migrate create --migrations-dir migrations --migration-file-language sql",
+    "obs:up": "docker compose -f observability/compose.yml --env-file observability/.env up -d",
+    "obs:down": "docker compose -f observability/compose.yml --env-file observability/.env down"
   },
   "keywords": [],
   "author": "",
