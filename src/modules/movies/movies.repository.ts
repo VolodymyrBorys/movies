@@ -1,5 +1,9 @@
 import type { PoolClient, QueryResultRow } from "pg";
-import type { MovieRow, MovieSort } from "../../models/movies.ts";
+import type {
+  MovieDetailsRow,
+  MovieRow,
+  MovieSort,
+} from "../../models/movies.ts";
 import { PG } from "../../infrastructure/postgres.ts";
 import { encodeMovieCursor, type MovieCursor } from "./cursor.ts";
 
@@ -16,8 +20,20 @@ interface MovieListRow extends MovieRow {
   cursor_created_at: string;
 }
 
-// Microsecond-precision UTC text, independent of session TimeZone/DateStyle.
-const CURSOR_CREATED_AT_SQL = `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+// The single date format of this API: RFC 3339 UTC text with MICROsecond precision
+// ("2026-11-19T10:00:00.123456Z"), independent of session TimeZone/DateStyle.
+// Used for response fields and the cursor alike; a JS Date would drop the microseconds.
+const CREATED_AT_UTC_SQL = `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+const MOVIE_DETAILS_COLUMNS = `id, title, description, release_year, duration_minutes, ${CREATED_AT_UTC_SQL} AS created_at, status, version`;
+
+export interface NewMovie {
+  title: string;
+  description: string | null;
+  releaseYear: number;
+  durationMinutes: number;
+  status: string;
+}
 
 class MoviesRepository {
   private async enqueueListInvalidation(
@@ -52,13 +68,13 @@ class MoviesRepository {
     const sql =
       cursor === null
         ? `
-          SELECT id, status, version, ${CURSOR_CREATED_AT_SQL} AS cursor_created_at
+          SELECT id, status, version, ${CREATED_AT_UTC_SQL} AS cursor_created_at
           FROM movies
           ORDER BY created_at ${direction}, id ${direction}
           LIMIT $1
         `
         : `
-          SELECT id, status, version, ${CURSOR_CREATED_AT_SQL} AS cursor_created_at
+          SELECT id, status, version, ${CREATED_AT_UTC_SQL} AS cursor_created_at
           FROM movies
           WHERE (created_at, id) ${operator} ($1::timestamptz, $2::uuid)
           ORDER BY created_at ${direction}, id ${direction}
@@ -88,6 +104,39 @@ class MoviesRepository {
           ? encodeMovieCursor({ createdAt: last.cursor_created_at, id: last.id })
           : null,
     };
+  }
+
+  async createMovie(movie: NewMovie): Promise<MovieDetailsRow> {
+    // LAB: simplified — POST is not idempotent: a client retry after a lost response
+    // creates a duplicate. Production would accept an Idempotency-Key and store it with
+    // a unique constraint (planned with edge retries, roadmap P10).
+    return PG.transaction(async (client) => {
+      const result = await client.query<MovieDetailsRow>(
+        `
+          INSERT INTO movies (title, description, release_year, duration_minutes, status, version)
+          VALUES ($1, $2, $3, $4, $5, 1)
+          RETURNING ${MOVIE_DETAILS_COLUMNS}
+        `,
+        [
+          movie.title,
+          movie.description,
+          movie.releaseYear,
+          movie.durationMinutes,
+          movie.status,
+        ],
+      );
+
+      const created = result.rows[0];
+
+      if (!created) {
+        // INSERT ... RETURNING always yields one row; reaching this is a driver/DB bug.
+        throw new Error("INSERT INTO movies returned no row");
+      }
+
+      await this.enqueueListInvalidation(client, created.id);
+
+      return created;
+    });
   }
 
   async updateMovie(id: string, status: string): Promise<MovieRow | null> {

@@ -8,6 +8,8 @@ import {
   type MovieCursor,
 } from "./cursor.ts";
 import { moviesRepository } from "./movies.repository.ts";
+import type { MovieDetailsRow } from "../../models/movies.ts";
+import type { CreateMovieBody } from "./validation/create-movie.ts";
 
 // LAB: simplified — these logs have no requestId (the service doesn't see `req`).
 // Request-scoped context (AsyncLocalStorage / OpenTelemetry) is roadmap phase P6.
@@ -79,6 +81,29 @@ export class MovieService {
     }
 
     return page;
+  }
+
+  async createMovie(body: CreateMovieBody): Promise<MovieDetailsRow> {
+    const movie = await moviesRepository.createMovie({
+      title: body.title,
+      description: body.description ?? null,
+      releaseYear: body.releaseYear,
+      durationMinutes: body.durationMinutes,
+      status: body.status,
+    });
+
+    // Best effort: зменшує звичайне вікно застарілого кешу.
+    // Надійне повторення забезпечує outbox worker.
+    try {
+      await REDIS.invalidateMoviesList();
+    } catch (error) {
+      logger.error(
+        { movieId: movie.id, err: error },
+        "Immediate movies cache invalidation failed; outbox will retry",
+      );
+    }
+
+    return movie;
   }
 
   async deleteMovie(id: string) {

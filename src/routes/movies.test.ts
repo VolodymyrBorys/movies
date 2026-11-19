@@ -256,6 +256,118 @@ describe("PATCH /v1/movies/:id", () => {
   });
 });
 
+describe("POST /v1/movies", () => {
+  // Microsecond text, as produced by to_char() in SQL.
+  const CREATED_AT = "2026-11-19T10:00:00.123456Z";
+
+  function fakeTransaction() {
+    const query = vi.fn(async (sql: string, params?: unknown[]) =>
+      /INSERT INTO movies/.test(sql)
+        ? {
+            rows: [
+              {
+                id: ID1,
+                title: params?.[0],
+                description: params?.[1],
+                release_year: params?.[2],
+                duration_minutes: params?.[3],
+                created_at: CREATED_AT,
+                status: params?.[4],
+                version: 1,
+              },
+            ],
+          }
+        : { rows: [] },
+    );
+    transaction.mockImplementation(async (callback) =>
+      callback({ query } as never),
+    );
+    return query;
+  }
+
+  const valid = { title: "  Arrival ", releaseYear: 2016, durationMinutes: 116 };
+
+  it("creates a movie with defaults, enqueues invalidation in the same transaction, returns 201", async () => {
+    const query = fakeTransaction();
+
+    const res = await request(app).post("/v1/movies").send(valid);
+
+    expect(res.status).toBe(201);
+    expect(res.headers.location).toBe(`/v1/movies/${ID1}`);
+    expect(res.body).toEqual({
+      data: {
+        id: ID1,
+        title: "Arrival", // trimmed
+        description: null,
+        release_year: 2016,
+        duration_minutes: 116,
+        created_at: CREATED_AT, // passed through unchanged, microseconds intact
+        status: "draft",
+        version: 1,
+      },
+    });
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]![0]).toMatch(/INSERT INTO movies\b/);
+    // Same UTC microsecond format as the cursor, not a JS Date.
+    expect(query.mock.calls[0]![0]).toMatch(
+      /to_char\(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS\.US"Z"'\) AS created_at/,
+    );
+    expect(query.mock.calls[0]![1]).toEqual(["Arrival", null, 2016, 116, "draft"]);
+    expect(query.mock.calls[1]![0]).toMatch(/INSERT INTO cache_invalidation_outbox/);
+    expect(query.mock.calls[1]![1]).toEqual(["movie", ID1, "movies.list.invalidate"]);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes description and an explicit status through", async () => {
+    const query = fakeTransaction();
+
+    const res = await request(app)
+      .post("/v1/movies")
+      .send({ ...valid, description: "Linguist meets heptapods", status: "published" });
+
+    expect(res.status).toBe(201);
+    expect(query.mock.calls[0]![1]).toEqual([
+      "Arrival",
+      "Linguist meets heptapods",
+      2016,
+      116,
+      "published",
+    ]);
+  });
+
+  it("still returns 201 when the immediate cache invalidation fails (outbox retries)", async () => {
+    fakeTransaction();
+    invalidate.mockRejectedValue(new Error("redis down"));
+
+    const res = await request(app).post("/v1/movies").send(valid);
+
+    expect(res.status).toBe(201);
+  });
+
+  it.each([
+    ["missing title", { releaseYear: 2016, durationMinutes: 116 }],
+    ["blank title", { ...valid, title: "   " }],
+    ["title over 200 chars", { ...valid, title: "x".repeat(201) }],
+    ["release year before 1888", { ...valid, releaseYear: 1887 }],
+    ["release year as string", { ...valid, releaseYear: "2016" }],
+    ["fractional duration", { ...valid, durationMinutes: 1.5 }],
+    ["duration 0", { ...valid, durationMinutes: 0 }],
+    ["missing duration", { title: "Arrival", releaseYear: 2016 }],
+    ["unknown status", { ...valid, status: "deleted" }],
+    ["client-supplied id", { ...valid, id: ID2 }],
+    ["client-supplied version", { ...valid, version: 7 }],
+  ])("rejects %s with 400 and does not hit storage", async (_name, body) => {
+    const res = await request(app).post("/v1/movies").send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(transaction).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
 describe("DELETE /v1/movies/:id", () => {
   function fakeTransaction(deleted: unknown[]) {
     const query = vi.fn(async (sql: string, _params?: unknown[]) =>

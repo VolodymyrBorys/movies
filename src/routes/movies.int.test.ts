@@ -3,6 +3,7 @@ import request from "supertest";
 import { app } from "../app.ts";
 import { PG } from "../infrastructure/postgres.ts";
 import { REDIS } from "../infrastructure/redis.ts";
+import { decodeMovieCursor } from "../modules/movies/cursor.ts";
 import {
   insertMovie,
   outboxRows,
@@ -178,6 +179,110 @@ describe("PATCH /v1/movies/:id (real PostgreSQL)", () => {
       .send({ status: "published" });
 
     expect(res.status).toBe(404);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe("POST /v1/movies (real PostgreSQL)", () => {
+  const body = {
+    title: "Arrival",
+    description: "Linguist meets heptapods",
+    releaseYear: 2016,
+    durationMinutes: 116,
+  };
+
+  it("inserts the movie and writes the outbox event", async () => {
+    const res = await request(app).post("/v1/movies").send(body);
+
+    expect(res.status).toBe(201);
+    const created = res.body.data;
+    expect(res.headers.location).toBe(`/v1/movies/${created.id}`);
+    expect(created).toMatchObject({
+      title: "Arrival",
+      description: "Linguist meets heptapods",
+      release_year: 2016,
+      duration_minutes: 116,
+      status: "draft",
+      version: 1,
+    });
+    expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(created.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+
+    const { rows } = await PG.writeQuery(
+      "SELECT title, release_year, duration_minutes, status, version FROM movies WHERE id = $1",
+      [created.id],
+    );
+    expect(rows[0]).toEqual({
+      title: "Arrival",
+      release_year: 2016,
+      duration_minutes: 116,
+      status: "draft",
+      version: 1,
+    });
+
+    const outbox = await outboxRows();
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({
+      aggregate_type: "movie",
+      aggregate_id: created.id,
+      event_type: "movies.list.invalidate",
+      processed_at: null,
+    });
+  });
+
+  it("returns created_at with full microsecond precision, identical to the cursor's value", async () => {
+    // Older row so that a limit=1 page of the new movie has hasMore → nextCursor.
+    await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+
+    const res = await request(app).post("/v1/movies").send(body);
+    expect(res.status).toBe(201);
+
+    const { rows } = await PG.writeQuery<{ exact: string }>(
+      `SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS exact
+       FROM movies WHERE id = $1`,
+      [res.body.data.id],
+    );
+    expect(res.body.data.created_at).toBe(rows[0]!.exact);
+
+    const page = await request(app).get("/v1/movies").query({ limit: "1" });
+    expect(page.body.data[0].id).toBe(res.body.data.id);
+    expect(decodeMovieCursor(page.body.nextCursor)).toEqual({
+      createdAt: res.body.data.created_at,
+      id: res.body.data.id,
+    });
+  });
+
+  it("shows the new movie in a previously cached list", async () => {
+    await insertMovie({ createdAt: "2026-01-01T00:00:00.000000Z" });
+    const before = await request(app).get("/v1/movies");
+    expect(before.body.data).toHaveLength(1);
+
+    const res = await request(app).post("/v1/movies").send(body);
+    expect(res.status).toBe(201);
+
+    const after = await request(app).get("/v1/movies");
+    // Newest first: created_at = now() is after the 2026-01-01 row.
+    expect(after.body.data.map((m: { id: string }) => m.id)[0]).toBe(res.body.data.id);
+    expect(after.body.data).toHaveLength(2);
+  });
+
+  it("rolls back the insert when the outbox insert fails (atomicity)", async () => {
+    await PG.writeQuery(
+      `ALTER TABLE cache_invalidation_outbox
+         ADD CONSTRAINT it_reject_events CHECK (event_type <> 'movies.list.invalidate') NOT VALID`,
+    );
+
+    try {
+      const res = await request(app).post("/v1/movies").send(body);
+      expect(res.status).toBe(500);
+    } finally {
+      await PG.writeQuery(
+        "ALTER TABLE cache_invalidation_outbox DROP CONSTRAINT it_reject_events",
+      );
+    }
+
+    const { rows } = await PG.writeQuery("SELECT 1 FROM movies");
+    expect(rows).toHaveLength(0);
     expect(await outboxRows()).toHaveLength(0);
   });
 });

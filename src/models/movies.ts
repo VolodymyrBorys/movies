@@ -27,6 +27,20 @@ export interface MovieRow extends QueryResultRow {
   version: number;
 }
 
+/** Full movie row as node-pg returns it (smallint → number). */
+export interface MovieDetailsRow extends QueryResultRow {
+  id: string;
+  title: string;
+  description: string | null;
+  release_year: number;
+  duration_minutes: number;
+  /** RFC 3339 UTC with microseconds, formatted in SQL ("2026-11-19T10:00:00.123456Z"). */
+  created_at: string;
+  // Nullable until a migration tightens them (roadmap P3, step C4).
+  status: string | null;
+  version: number | null;
+}
+
 export interface MoviePage {
   data: MovieRow[];
   hasMore: boolean;

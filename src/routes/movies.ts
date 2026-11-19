@@ -6,10 +6,12 @@ import { asyncHandler } from "../utils/errors.ts";
 import { validate } from "../utils/validate-query.ts";
 import { getMoviesQuerySchema } from "../modules/movies/validation/get-movies.ts";
 import {
+  createMovie,
   deleteMovie,
   getMovies,
   updateMovie,
 } from "../modules/movies/movies.controller.ts";
+import { createMovieBodySchema } from "../modules/movies/validation/create-movie.ts";
 import {
   updateMovieBodySchema,
   updateMovieParamsSchema,
@@ -21,6 +23,12 @@ router.get(
   "/movies",
   validate("query", getMoviesQuerySchema),
   asyncHandler(getMovies),
+);
+
+router.post(
+  "/movies",
+  validate("body", createMovieBodySchema),
+  asyncHandler(createMovie),
 );
 
 router.patch(
