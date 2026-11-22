@@ -5,6 +5,32 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-22 (session 2) · D5: `docs/progress/rag.md` for the HTTP layer
+
+Branch `p7-rag-docs` (from `master` at `e311a3a`).
+
+### Corrections to the previous entry
+- `p7-rag-endpoints` **was merged into `master` and pushed** by the owner (`master` =
+  `origin/master` = `e311a3a`; the branch no longer exists). The previous entry says "not merged".
+- Owner: integration tests OK after the merge (count not reported).
+
+### Worked on / completed
+- D5: `docs/progress/rag.md` rewritten from the code: status, architecture incl. HTTP layer,
+  decisions (config, signal/deadlines, error table, generation, metrics), per-file test counts,
+  open issues (old #1, #4, #6, #9, #11 resolved; #5 extended to `</movie>`; #12–#18 new).
+- Roadmap header / "next task" updated (merged; next = D6).
+
+### Verification
+- Assistant: `npx tsc -p .` exit 0; RAG-related unit tests 166/166 in 13 files.
+- Test descriptions in `rag.md` checked against test names; docs only, no code changed.
+
+### Next steps (in order)
+1. D6: plan, then escape/neutralize prompt delimiters for `<context>` and `<movie>` with tests.
+2. Owner: RAG vars in `.env.example`.
+3. B: P2 k6 baseline (k6 install → approval). 4. P5 RabbitMQ (async review worker).
+
+---
+
 ## 2026-11-22 · Block D (P7): RAG config, typed errors, search/answer/review endpoints
 
 Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89` (D1),
