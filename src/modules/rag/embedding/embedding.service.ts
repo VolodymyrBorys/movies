@@ -1,4 +1,4 @@
-import { geminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
+import { getGeminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
 
 const MODEL = "gemini-embedding-001";
 const DIMENSIONS = 768;
@@ -22,7 +22,7 @@ export class EmbeddingService {
     }
 
     // Client-side cancellation only: Gemini may still bill a request already sent.
-    const response = await geminiClient.models.embedContent({
+    const response = await getGeminiClient().models.embedContent({
       model: MODEL,
       contents: text,
       config: {

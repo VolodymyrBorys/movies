@@ -1,24 +1,10 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { loadEnvFile } from "node:process";
-
-const envFile = join(import.meta.dirname, "../.env");
-
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
-}
-
-const [
-  { qdrantClient },
-  { qdrantCollectionService },
-  { qdrantDocumentService },
-  { TECHNICAL_DOCUMENTS_COLLECTION },
-] = await Promise.all([
-  import("../src/infrastructure/qdrant/qdrant.client.ts"),
-  import("../src/modules/rag/vector-store/qdrant-collection.service.ts"),
-  import("../src/modules/rag/vector-store/qdrant-document.service.ts"),
-  import("../src/modules/rag/vector-store/qdrant-collection.service.ts"),
-]);
+// Run: node --env-file-if-exists=.env scripts/test-qdrant-upsert.ts
+import { getQdrantClient } from "../src/infrastructure/qdrant/qdrant.client.ts";
+import {
+  qdrantCollectionService,
+  TECHNICAL_DOCUMENTS_COLLECTION,
+} from "../src/modules/rag/vector-store/qdrant-collection.service.ts";
+import { qdrantDocumentService } from "../src/modules/rag/vector-store/qdrant-document.service.ts";
 
 const documents = [
   {
@@ -79,7 +65,7 @@ async function main(): Promise<void> {
     });
 
     // 3. Verify points in Qdrant.
-    const retrieved = await qdrantClient.retrieve(
+    const retrieved = await getQdrantClient().retrieve(
       TECHNICAL_DOCUMENTS_COLLECTION,
       {
         ids: result.pointIds,

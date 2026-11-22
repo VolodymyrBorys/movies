@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { embeddingService } from "../embedding/embedding.service.ts";
-import { qdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
+import { getQdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
 import type { Schemas } from "@qdrant/js-client-rest";
 import type {
   QdrantDocumentPayload,
@@ -64,12 +64,12 @@ export class QdrantDocumentService {
         }),
       );
 
-      await qdrantClient.upsert(COLLECTION_NAME, {
+      await getQdrantClient().upsert(COLLECTION_NAME, {
         wait: true,
         points,
       });
 
-      await qdrantClient.upsert(COLLECTION_NAME, {
+      await getQdrantClient().upsert(COLLECTION_NAME, {
         wait: true,
         points,
       });

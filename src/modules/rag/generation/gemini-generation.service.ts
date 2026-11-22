@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { geminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
+import { getGeminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
 import type {
   GenerateAnswerInput,
   GenerateAnswerResult,
@@ -111,7 +111,7 @@ ${question}
 
         const startedAt = Date.now();
 
-        const response = await geminiClient.models.generateContent({
+        const response = await getGeminiClient().models.generateContent({
           model: MODEL,
           contents: prompt,
           config: {

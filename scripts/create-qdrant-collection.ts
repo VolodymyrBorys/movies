@@ -1,13 +1,5 @@
+// Run: node --env-file-if-exists=.env scripts/create-qdrant-collection.ts
 import { qdrantCollectionService } from "../src/modules/rag/vector-store/qdrant-collection.service.ts";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { loadEnvFile } from "node:process";
-
-const envFile = join(import.meta.dirname, "../.env");
-
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
-}
 
 async function main(): Promise<void> {
   await qdrantCollectionService.ensureTechnicalDocumentsCollection();

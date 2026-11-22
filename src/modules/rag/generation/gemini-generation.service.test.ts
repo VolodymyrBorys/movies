@@ -8,7 +8,7 @@ const { generateContent, sleep } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../infrastructure/gemini/gemini.client.ts", () => ({
-  geminiClient: { models: { generateContent } },
+  getGeminiClient: () => ({ models: { generateContent } }),
 }));
 
 vi.mock("node:timers/promises", () => ({ setTimeout: sleep }));

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-// Single place that reads process.env. The rest of the app imports `config`.
+// Reads process.env for the app core; the rest of the app imports `config`.
+// The optional RAG section (Gemini/Qdrant) lives in ./rag.ts so RAG scripts don't need PG_*.
 // Loading `.env` is NOT done here: in development `node --env-file-if-exists=.env`
 // fills process.env; in production the platform injects variables.
 //

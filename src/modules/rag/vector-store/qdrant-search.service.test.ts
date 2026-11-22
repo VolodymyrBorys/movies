@@ -12,12 +12,12 @@ const { query, embedQuery, qdrant } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../infrastructure/qdrant/qdrant.client.ts", () => ({
-  qdrantClient: {
+  getQdrantClient: () => ({
     query: (...args: unknown[]): Promise<unknown> => {
       query(...args);
       return qdrant.respond();
     },
-  },
+  }),
 }));
 
 vi.mock("../embedding/embedding.service.ts", () => ({

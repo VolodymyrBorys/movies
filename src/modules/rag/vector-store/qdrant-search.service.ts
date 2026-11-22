@@ -1,4 +1,4 @@
-import { qdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
+import { getQdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
 import { embeddingService } from "../embedding/embedding.service.ts";
 import type {
   QdrantDocumentPayload,
@@ -146,7 +146,7 @@ export class QdrantSearchService {
     signal?.throwIfAborted();
 
     const response = await raceWithSignal(
-      qdrantClient.query(COLLECTION_NAME, {
+      getQdrantClient().query(COLLECTION_NAME, {
         query: queryVector,
         limit,
         with_payload: true,

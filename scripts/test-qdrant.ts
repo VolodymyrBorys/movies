@@ -1,21 +1,11 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { loadEnvFile } from "node:process";
-
-// Load environment before importing modules that use process.env.
-const envFile = join(import.meta.dirname, "../.env");
-
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
-}
-
-const [{ qdrantClient }, { qdrantCollectionService }] = await Promise.all([
-  import("../src/infrastructure/qdrant/qdrant.client.ts"),
-  import("../src/modules/rag/vector-store/qdrant-collection.service.ts"),
-]);
+// Run: node --env-file-if-exists=.env scripts/test-qdrant.ts
+import { getQdrantClient } from "../src/infrastructure/qdrant/qdrant.client.ts";
+import { qdrantCollectionService } from "../src/modules/rag/vector-store/qdrant-collection.service.ts";
 
 async function main(): Promise<void> {
   try {
+    const qdrantClient = getQdrantClient();
+
     // 1. Check connection
     const { collections } = await qdrantClient.getCollections();
 

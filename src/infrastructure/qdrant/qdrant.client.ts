@@ -1,18 +1,21 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { loadEnvFile } from "node:process";
+import { ragConfig, RagNotConfiguredError } from "../../config/rag.ts";
 
-const envFile = join(import.meta.dirname, "../../../.env");
+let client: QdrantClient | undefined;
 
-if (existsSync(envFile)) {
-  loadEnvFile(envFile);
+/**
+ * Created on first use, so importing this module never fails: the API starts
+ * without RAG config, and RAG calls fail with RagNotConfiguredError instead.
+ */
+export function getQdrantClient(): QdrantClient {
+  if (client) return client;
+  if (!ragConfig) throw new RagNotConfiguredError();
+
+  const { url, apiKey, timeoutMs } = ragConfig.qdrant;
+  client = new QdrantClient({
+    url,
+    timeout: timeoutMs,
+    ...(apiKey ? { apiKey } : {}),
+  });
+  return client;
 }
-
-const url = process.env.QDRANT_URL!;
-const apiKey = process.env.QDRANT_API_KEY;
-
-export const qdrantClient = new QdrantClient({
-  url,
-  ...(apiKey ? { apiKey } : {}),
-});

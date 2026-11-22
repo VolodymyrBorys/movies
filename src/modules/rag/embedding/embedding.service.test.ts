@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { embedContent } = vi.hoisted(() => ({ embedContent: vi.fn() }));
 
 vi.mock("../../../infrastructure/gemini/gemini.client.ts", () => ({
-  geminiClient: { models: { embedContent } },
+  getGeminiClient: () => ({ models: { embedContent } }),
 }));
 
 const { EmbeddingService } = await import("./embedding.service.ts");

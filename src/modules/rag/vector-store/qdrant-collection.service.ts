@@ -1,4 +1,4 @@
-import { qdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
+import { getQdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
 
 export const TECHNICAL_DOCUMENTS_COLLECTION = "technical_documents";
 
@@ -7,12 +7,12 @@ const DISTANCE = "Cosine" as const;
 
 export class QdrantCollectionService {
   async ensureTechnicalDocumentsCollection(): Promise<void> {
-    const { exists } = await qdrantClient.collectionExists(
+    const { exists } = await getQdrantClient().collectionExists(
       TECHNICAL_DOCUMENTS_COLLECTION,
     );
 
     if (!exists) {
-      await qdrantClient.createCollection(TECHNICAL_DOCUMENTS_COLLECTION, {
+      await getQdrantClient().createCollection(TECHNICAL_DOCUMENTS_COLLECTION, {
         vectors: {
           size: VECTOR_SIZE,
           distance: DISTANCE,
@@ -22,7 +22,7 @@ export class QdrantCollectionService {
       console.log(`Collection "${TECHNICAL_DOCUMENTS_COLLECTION}" created`);
     }
 
-    const collection = await qdrantClient.getCollection(
+    const collection = await getQdrantClient().getCollection(
       TECHNICAL_DOCUMENTS_COLLECTION,
     );
 
