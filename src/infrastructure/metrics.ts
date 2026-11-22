@@ -91,9 +91,20 @@ export type RagGenerationAttemptOutcome =
   | "timeout"
   | "cancelled";
 export type RagTokenType = "prompt" | "output" | "thoughts";
+/** What a Gemini generation is for, so the cost of movie reviews is visible apart from RAG. */
+export type RagGenerationOperation = "answer" | "review";
+/** retrieval = embed/search stages (shared by search and answer); generate = answer | review. */
+export type RagStageOperation = "retrieval" | RagGenerationOperation;
 
-const RAG_STAGES = ["embed", "search", "generate"] as const satisfies readonly RagMetricStage[];
 const RAG_STAGE_OUTCOMES = ["ok", "error", "cancelled"] as const satisfies readonly RagStageOutcome[];
+const RAG_GENERATION_OPERATIONS = ["answer", "review"] as const satisfies readonly RagGenerationOperation[];
+// Only the combinations that exist; pre-created below.
+const RAG_STAGE_SERIES = [
+  ["embed", "retrieval"],
+  ["search", "retrieval"],
+  ["generate", "answer"],
+  ["generate", "review"],
+] as const satisfies ReadonlyArray<readonly [RagMetricStage, RagStageOperation]>;
 
 /**
  * Wall time per pipeline stage. generate includes retries and backoff, so it is what the
@@ -102,8 +113,8 @@ const RAG_STAGE_OUTCOMES = ["ok", "error", "cancelled"] as const satisfies reado
  */
 export const ragStageDuration = new Histogram({
   name: "rag_stage_duration_seconds",
-  help: "Duration of RAG pipeline stages (embed, search, generate) by outcome",
-  labelNames: ["stage", "outcome"] as const,
+  help: "Duration of RAG pipeline stages (embed, search, generate) by operation and outcome",
+  labelNames: ["stage", "operation", "outcome"] as const,
   buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60],
   registers: [metricsRegistry],
 });
@@ -117,36 +128,38 @@ export const ragGenerationSkippedTotal = new Counter({
 /** One per Gemini generateContent call; retries = everything except the final attempt. */
 export const ragGenerationAttemptsTotal = new Counter({
   name: "rag_generation_attempts_total",
-  help: "Gemini generation attempts by outcome",
-  labelNames: ["outcome"] as const,
+  help: "Gemini generation attempts by operation and outcome",
+  labelNames: ["operation", "outcome"] as const,
   registers: [metricsRegistry],
 });
 
 /** From Gemini usageMetadata; thoughts are billed as output on thinking models. */
 export const ragTokensTotal = new Counter({
   name: "rag_tokens_total",
-  help: "Gemini generation tokens by type (from response usage metadata)",
-  labelNames: ["type"] as const,
+  help: "Gemini generation tokens by operation and type (from response usage metadata)",
+  labelNames: ["operation", "type"] as const,
   registers: [metricsRegistry],
 });
 
-for (const stage of RAG_STAGES) {
+for (const [stage, operation] of RAG_STAGE_SERIES) {
   for (const outcome of RAG_STAGE_OUTCOMES) {
-    ragStageDuration.zero({ stage, outcome });
+    ragStageDuration.zero({ stage, operation, outcome });
   }
 }
 ragGenerationSkippedTotal.inc(0);
-for (const outcome of [
-  "ok",
-  "retryable_error",
-  "error",
-  "timeout",
-  "cancelled",
-] as const satisfies readonly RagGenerationAttemptOutcome[]) {
-  ragGenerationAttemptsTotal.inc({ outcome }, 0);
-}
-for (const type of ["prompt", "output", "thoughts"] as const satisfies readonly RagTokenType[]) {
-  ragTokensTotal.inc({ type }, 0);
+for (const operation of RAG_GENERATION_OPERATIONS) {
+  for (const outcome of [
+    "ok",
+    "retryable_error",
+    "error",
+    "timeout",
+    "cancelled",
+  ] as const satisfies readonly RagGenerationAttemptOutcome[]) {
+    ragGenerationAttemptsTotal.inc({ operation, outcome }, 0);
+  }
+  for (const type of ["prompt", "output", "thoughts"] as const satisfies readonly RagTokenType[]) {
+    ragTokensTotal.inc({ operation, type }, 0);
+  }
 }
 
 /**

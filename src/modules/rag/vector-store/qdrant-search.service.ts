@@ -163,7 +163,7 @@ export class QdrantSearchService {
     signal?.throwIfAborted();
 
     // Stage "search" = Qdrant query + payload validation (embedding is timed on its own).
-    return timeStage("search", signal, async () => {
+    return timeStage({ stage: "search", operation: "retrieval" }, signal, async () => {
       let response: Awaited<ReturnType<QdrantClient["query"]>>;
       try {
         response = await raceWithSignal(

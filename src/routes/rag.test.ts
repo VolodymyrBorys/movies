@@ -27,6 +27,7 @@ vi.mock("../infrastructure/redis.ts", () => ({
 vi.mock("../modules/rag/rag-deadlines.ts", () => ({
   SEARCH_DEADLINE_MS: 100,
   ANSWER_DEADLINE_MS: 100,
+  REVIEW_DEADLINE_MS: 100,
 }));
 
 const { search, answer } = vi.hoisted(() => ({ search: vi.fn(), answer: vi.fn() }));

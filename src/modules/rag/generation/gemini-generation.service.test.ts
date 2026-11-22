@@ -260,11 +260,17 @@ describe("GeminiGenerationService", () => {
   });
 
   describe("metrics", () => {
+    // RAG answers are labelled operation="answer" (reviews: movie-review-generation tests).
     const attempts = (outcome: string) =>
-      metricValue(ragGenerationAttemptsTotal, { outcome });
-    const tokens = (type: string) => metricValue(ragTokensTotal, { type });
+      metricValue(ragGenerationAttemptsTotal, { operation: "answer", outcome });
+    const tokens = (type: string) =>
+      metricValue(ragTokensTotal, { operation: "answer", type });
     const stage = (outcome: string) =>
-      metricValue(ragStageDuration, { stage: "generate", outcome }, "_count");
+      metricValue(
+        ragStageDuration,
+        { stage: "generate", operation: "answer", outcome },
+        "_count",
+      );
 
     async function snapshot() {
       return {

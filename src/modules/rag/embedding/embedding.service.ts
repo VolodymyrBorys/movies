@@ -28,7 +28,7 @@ export class EmbeddingService {
       throw new RagInputError("Text cannot be empty");
     }
 
-    return timeStage("embed", signal, () =>
+    return timeStage({ stage: "embed", operation: "retrieval" }, signal, () =>
       this.requestEmbedding(text, taskType, signal),
     );
   }

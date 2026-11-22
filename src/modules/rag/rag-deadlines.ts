@@ -9,3 +9,6 @@ export const SEARCH_DEADLINE_MS = 5_000;
 // 60 s generation attempt timeout on purpose: the deadline, not the per-attempt timeout,
 // bounds what the client waits; it also caps how much retrying a single request can do.
 export const ANSWER_DEADLINE_MS = 30_000;
+
+// Review = primary read by id + generate (same retry policy as answers).
+export const REVIEW_DEADLINE_MS = 30_000;
