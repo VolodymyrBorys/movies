@@ -5,10 +5,11 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
-## 2026-11-22 · Block D (P7): RAG config, typed errors, search + answer endpoints
+## 2026-11-22 · Block D (P7): RAG config, typed errors, search/answer/review endpoints
 
 Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89` (D1),
-`612c6ff` (D2), `e8accff` (D3) + this docs commit. Not merged, not pushed.
+`612c6ff` (D2), `e8accff` (D3), `be3f67a` (docs), `9c09701` (D4) + end-of-session docs commit.
+Not merged, not pushed. Working tree clean before the docs commit.
 
 ### Worked on / completed
 - D0: optional RAG config `src/config/rag.ts` (`GEMINI_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`,
@@ -20,6 +21,13 @@ Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89
 - D3: `POST /v1/rag/answer` → `{ data: RagAnswerResult }`; metrics `rag_stage_duration_seconds`,
   `rag_generation_skipped_total`, `rag_generation_attempts_total`, `rag_tokens_total`; pino logger
   in generation.
+- D4: `POST /v1/movies/:id/review` → `{ data: { movieId, movieVersion, review, model } }`
+  (primary read, 404 `MOVIE_NOT_FOUND`, 30 s, not persisted); `generation/gemini-generate.ts` is the
+  single `generateContent` call site (retry loop moved unchanged); `operation` label
+  (`answer`/`review`; stages: `retrieval`) on RAG metrics.
+- Docs: owner's uncommitted roadmap/session-log edits reviewed — block C additions kept,
+  stale header/"next task" replaced; CLAUDE.md "Current state" updated (RAG config, RAG endpoints,
+  no live Gemini runs).
 
 ### Key decisions (why)
 - **No live Gemini runs** (owner): billable and mostly 503. Behavior is implemented as designed and
@@ -34,12 +42,35 @@ Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89
 - RagInputError → `VALIDATION_ERROR`, same code as the Zod boundary.
 - Search returns raw `chunks` (new additive `BuiltContext.chunks`), not prompt-formatted text.
 - Deadlines 5 s / 30 s are hypotheses; 30 s < one 60 s generation attempt by design.
+- Review (owner): same model, temperature 0.7, 1024 output tokens; movie fields inside
+  `<movie>…</movie>` marked untrusted. No `generatedAt`: API dates come from SQL (microseconds),
+  response time is in the `Date` header. Generation skipped if the deadline passed during the DB read.
+
+### Files
+- Created: `src/config/rag.ts`, `src/infrastructure/shutdown-signal.ts`,
+  `src/utils/request-signal.ts`, `src/modules/rag/{rag.errors,rag-http-errors,rag-metrics,rag-deadlines,rag.controller}.ts`,
+  `src/modules/rag/validation/{knowledge-base-search,rag-answer}.ts`,
+  `src/modules/rag/generation/{gemini-generate,movie-review-generation.service}.ts`,
+  `src/modules/movies/movie-review.controller.ts`, `src/routes/rag.ts`; tests
+  `src/config/rag.test.ts`, `src/infrastructure/rag-clients.test.ts`, `src/utils/request-signal.test.ts`,
+  `src/modules/rag/{rag.errors,rag-http-errors,rag-metrics}.test.ts`,
+  `src/modules/rag/generation/movie-review-generation.service.test.ts`,
+  `src/routes/{rag,movie-review}.test.ts`.
+- Modified: `src/{app,server}.ts`, `src/config/env.ts` (comment), `src/infrastructure/{metrics.ts,gemini/gemini.client.ts,qdrant/qdrant.client.ts}`,
+  `src/routes/movies.ts`, RAG services (embedding, generation, qdrant search/document/collection,
+  knowledge-base search, rag-service, context builder + types) and their tests,
+  `scripts/{create-qdrant-collection,test-qdrant,test-qdrant-search,test-qdrant-upsert}.ts`,
+  `CLAUDE.md`, `docs/learning-roadmap.md`, `docs/session-log.md`.
 
 ### Verification
-- Assistant: `npx tsc -p .` exit 0; unit tests 229/229; mutation checks on client getters,
-  abort-reason precedence, `writableFinished`, wrap-after-abort, attempt/token metrics.
-- Owner: `npx vitest run src/routes` passed (incl. `rag.test.ts`) after D2 and D3.
-- Not run: any RAG script; live Gemini/Qdrant; shutdown path in `server.ts` (typecheck only).
+- Assistant: `npx tsc -p .` exit 0; unit tests 238/238 (`npx vitest run src/config src/infrastructure
+  src/modules src/workers src/utils`); mutation checks (all caught, code restored): client getters,
+  abort-reason precedence, `writableFinished`, wrap-after-abort, attempt/token metrics, review
+  `operation` label, tokens per operation, `<movie>` block.
+- Owner: `npx vitest run src/routes` passed after D2, D3 and D4 (incl. `rag.test.ts`,
+  `movie-review.test.ts`, `movies.test.ts`). Exact counts not reported.
+- Not run: integration tests (`npm run test:integration`) after the `app.ts`/`routes/movies.ts`
+  changes; any RAG script; live Gemini/Qdrant; shutdown path in `server.ts` (typecheck only).
 
 ### Known issues / findings
 - RAG scripts importing generation need `PG_*` again (logger → `env.ts`); also import
@@ -47,15 +78,23 @@ Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89
 - `usageMetadata` field names checked against `@google/genai@3.0.0` types only; its JSDoc says
   "not supported in Gemini API" → `rag_tokens_total` may stay 0.
 - Aborted requests (499) never reach HTTP metrics (recorded on `finish`).
-- CLAUDE.md "Current state" still says RAG has no HTTP endpoint (update proposed);
-  `docs/progress/rag.md` not updated yet (D5).
-- `.env.example` needs the RAG variables (owner).
+- `docs/progress/rag.md` is stale (says no HTTP endpoint; open issues #1, #4, #6, #9, #11 changed) → D5.
+- Prompt delimiters unescaped: `</context>` (issue #5) and now `</movie>` → D6.
+- Review allowed for any movie status (`draft`/`archived` too) — no requirement given; open decision.
+- No rate limit / token budget on billable endpoints (`// LAB:`).
+- Response casing is mixed in the API (movies snake_case, RAG/review camelCase) — pre-existing.
+- `.env.example` needs the RAG variables (owner; assistant can't read `.env*`).
+- Assistant sandbox: no local port binding → owner runs `src/routes` tests; zsh doesn't word-split
+  unquoted `$VAR` in scripts (a mutation run silently tested nothing once; re-run with explicit paths).
 
 ### Next steps (in order)
-1. D4: synchronous `POST /v1/movies/:id/review` (primary read, 404, review prompt in
-   `rag/generation/`, shared retry loop, `operation` label on generation metrics, 30 s, not persisted).
-2. D5: `docs/progress/rag.md`; D6: escape prompt delimiters (issue #5). Then merge the branch.
-3. B: P2 k6 baseline. 4. P5 RabbitMQ (async review worker).
+1. D5 (docs only): rewrite `docs/progress/rag.md` — status, architecture with the HTTP layer,
+   decisions (errors, signal, deadlines, metrics, review), tests, updated open issues.
+2. D6: plan, then escape/neutralize prompt delimiters for `<context>` and `<movie>` with tests.
+3. Owner: `npm run test:integration` on the branch; add RAG vars to `.env.example`; then push and
+   merge `p7-rag-endpoints` (PR or fast-forward).
+4. B: P2 k6 baseline (k6 install → approval). 5. P5 RabbitMQ (async review worker).
+6. Deferred: P1 drills 2–3, replica decision + lag alert; review status rule; rate limiting.
 
 ---
 
