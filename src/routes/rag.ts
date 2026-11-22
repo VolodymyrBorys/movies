@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { searchKnowledgeBase } from "../modules/rag/rag.controller.ts";
+import { answerQuestion, searchKnowledgeBase } from "../modules/rag/rag.controller.ts";
 import { knowledgeBaseSearchBodySchema } from "../modules/rag/validation/knowledge-base-search.ts";
+import { ragAnswerBodySchema } from "../modules/rag/validation/rag-answer.ts";
 import { asyncHandler } from "../utils/errors.ts";
 import { validate } from "../utils/validate-query.ts";
 
@@ -12,4 +13,10 @@ router.post(
   "/knowledge-base/search",
   validate("body", knowledgeBaseSearchBodySchema),
   asyncHandler(searchKnowledgeBase),
+);
+
+router.post(
+  "/rag/answer",
+  validate("body", ragAnswerBodySchema),
+  asyncHandler(answerQuestion),
 );

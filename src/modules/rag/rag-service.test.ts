@@ -17,6 +17,8 @@ vi.mock("./generation/gemini-generation.service.ts", () => ({
 }));
 
 const { RagService } = await import("./rag-service.ts");
+const { ragGenerationSkippedTotal } = await import("../../infrastructure/metrics.ts");
+const { metricValue } = await import("../../test/metric-value.ts");
 
 const filledContext: BuiltContext = {
   text: "[Source: manual.md]\n\nWAL replay.",
@@ -51,6 +53,17 @@ describe("RagService", () => {
     generate.mockReset();
     kbSearch.mockResolvedValue({ context: filledContext, retrievedChunks: 5 });
     generate.mockResolvedValue({ answer: "Use WAL.", model: "test-model" });
+  });
+
+  it("counts skipped generations only for an empty context", async () => {
+    const before = await metricValue(ragGenerationSkippedTotal);
+
+    kbSearch.mockResolvedValueOnce({ context: emptyContext, retrievedChunks: 0 });
+    await service.answer({ question: "question" });
+    expect(await metricValue(ragGenerationSkippedTotal)).toBe(before + 1);
+
+    await service.answer({ question: "question" });
+    expect(await metricValue(ragGenerationSkippedTotal)).toBe(before + 1);
   });
 
   it("rejects an empty question without any external call", async () => {

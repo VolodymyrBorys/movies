@@ -6,6 +6,7 @@ import {
   RagUpstreamError,
   toUpstreamError,
 } from "../rag.errors.ts";
+import { timeStage } from "../rag-metrics.ts";
 import type {
   QdrantDocumentPayload,
   QdrantSearchOptions,
@@ -161,30 +162,33 @@ export class QdrantSearchService {
     // raceWithSignal runs, so a check inside it would come too late.
     signal?.throwIfAborted();
 
-    let response: Awaited<ReturnType<QdrantClient["query"]>>;
-    try {
-      response = await raceWithSignal(
-        getQdrantClient().query(COLLECTION_NAME, {
-          query: queryVector,
-          limit,
-          with_payload: true,
-          ...(scoreThreshold !== undefined
-            ? { score_threshold: scoreThreshold }
-            : {}),
-          ...(must.length > 0 ? { filter: { must } } : {}),
-        }),
-        signal,
-      );
-    } catch (error: unknown) {
-      throw toUpstreamError("search", error, signal);
-    }
+    // Stage "search" = Qdrant query + payload validation (embedding is timed on its own).
+    return timeStage("search", signal, async () => {
+      let response: Awaited<ReturnType<QdrantClient["query"]>>;
+      try {
+        response = await raceWithSignal(
+          getQdrantClient().query(COLLECTION_NAME, {
+            query: queryVector,
+            limit,
+            with_payload: true,
+            ...(scoreThreshold !== undefined
+              ? { score_threshold: scoreThreshold }
+              : {}),
+            ...(must.length > 0 ? { filter: { must } } : {}),
+          }),
+          signal,
+        );
+      } catch (error: unknown) {
+        throw toUpstreamError("search", error, signal);
+      }
 
-    // 4. Convert Qdrant response into our domain result.
-    return response.points.map((point) => ({
-      id: point.id,
-      score: point.score,
-      payload: validatePayload(point.payload as Record<string, unknown> | null),
-    }));
+      // 4. Convert Qdrant response into our domain result.
+      return response.points.map((point) => ({
+        id: point.id,
+        score: point.score,
+        payload: validatePayload(point.payload as Record<string, unknown> | null),
+      }));
+    });
   }
 }
 

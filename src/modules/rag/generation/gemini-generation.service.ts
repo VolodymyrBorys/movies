@@ -1,5 +1,13 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import type { GenerateContentResponseUsageMetadata } from "@google/genai";
 import { getGeminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
+import { logger } from "../../../infrastructure/logger.ts";
+import {
+  ragGenerationAttemptsTotal,
+  ragTokensTotal,
+  type RagTokenType,
+} from "../../../infrastructure/metrics.ts";
+import { timeStage } from "../rag-metrics.ts";
 import {
   getHttpStatus,
   RagInputError,
@@ -46,6 +54,27 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const log = logger.child({ component: "gemini-generation" });
+
+// Field names verified against @google/genai 3.0.0 types only (no live response observed).
+function recordTokenUsage(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+): void {
+  if (!usage) return;
+
+  const counts: Array<[RagTokenType, number | undefined]> = [
+    ["prompt", usage.promptTokenCount],
+    ["output", usage.candidatesTokenCount],
+    ["thoughts", usage.thoughtsTokenCount],
+  ];
+
+  for (const [type, count] of counts) {
+    if (count !== undefined && Number.isFinite(count) && count > 0) {
+      ragTokensTotal.inc({ type }, count);
+    }
+  }
+}
+
 export class GeminiGenerationService {
   async generate(input: GenerateAnswerInput): Promise<GenerateAnswerResult> {
     const question = input.question.trim();
@@ -71,11 +100,19 @@ User question:
 ${question}
 `;
 
+    // Stage "generate" = all attempts + backoff: the time the caller actually waited.
+    return timeStage("generate", input.signal, () =>
+      this.generateWithRetries(prompt, input.signal),
+    );
+  }
+
+  private async generateWithRetries(
+    prompt: string,
+    callerSignal: AbortSignal | undefined,
+  ): Promise<GenerateAnswerResult> {
     // Retries are done here only: SDK @google/genai 3.x retries HTTP calls
     // solely when httpOptions.retryOptions is set, and our client doesn't set it.
     // Note: aborting is client-side only; Gemini may still bill the request.
-    const callerSignal = input.signal;
-
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       callerSignal?.throwIfAborted();
 
@@ -91,7 +128,7 @@ ${question}
         : controller.signal;
 
       try {
-        console.log(`[Gemini] Request attempt ${attempt}/${MAX_ATTEMPTS}`);
+        log.debug({ attempt, maxAttempts: MAX_ATTEMPTS }, "Gemini generation attempt");
 
         const startedAt = Date.now();
 
@@ -106,7 +143,10 @@ ${question}
           },
         });
 
-        const duration = Date.now() - startedAt;
+        // Any response is billed, even one with an empty answer.
+        recordTokenUsage(response.usageMetadata);
+
+        const durationMs = Date.now() - startedAt;
         const answer = response.text?.trim();
 
         if (!answer) {
@@ -118,7 +158,8 @@ ${question}
           );
         }
 
-        console.log(`[Gemini] Completed in ${duration}ms`);
+        ragGenerationAttemptsTotal.inc({ outcome: "ok" });
+        log.debug({ attempt, durationMs }, "Gemini generation completed");
 
         return {
           answer,
@@ -127,10 +168,12 @@ ${question}
       } catch (error: unknown) {
         // Cancelled by the caller: never retry.
         if (callerSignal?.aborted) {
+          ragGenerationAttemptsTotal.inc({ outcome: "cancelled" });
           throw error;
         }
 
         if (controller.signal.aborted) {
+          ragGenerationAttemptsTotal.inc({ outcome: "timeout" });
           throw new RagUpstreamError(
             "generate",
             `Gemini request timed out after ${REQUEST_TIMEOUT_MS}ms`,
@@ -141,6 +184,10 @@ ${question}
         const retryable = isRetryableError(error);
         const isLastAttempt = attempt === MAX_ATTEMPTS;
 
+        ragGenerationAttemptsTotal.inc({
+          outcome: retryable ? "retryable_error" : "error",
+        });
+
         if (!retryable || isLastAttempt) {
           throw toUpstreamError("generate", error);
         }
@@ -150,9 +197,15 @@ ${question}
         const jitter = Math.floor(Math.random() * 250);
         const retryDelay = exponentialDelay + jitter;
 
-        console.warn(
-          `[Gemini] Request failed: ${getErrorMessage(error)}. ` +
-            `Retrying in ${retryDelay}ms`,
+        // Status + SDK message only; never the prompt or retrieved context.
+        log.warn(
+          {
+            attempt,
+            status: getHttpStatus(error),
+            error: getErrorMessage(error),
+            retryDelayMs: retryDelay,
+          },
+          "Gemini generation failed; retrying",
         );
 
         // Backoff wait is cancellable by the caller as well.

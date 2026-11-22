@@ -5,6 +5,7 @@ import {
   RagUpstreamError,
   toUpstreamError,
 } from "../rag.errors.ts";
+import { timeStage } from "../rag-metrics.ts";
 
 const MODEL = "gemini-embedding-001";
 const DIMENSIONS = 768;
@@ -27,6 +28,16 @@ export class EmbeddingService {
       throw new RagInputError("Text cannot be empty");
     }
 
+    return timeStage("embed", signal, () =>
+      this.requestEmbedding(text, taskType, signal),
+    );
+  }
+
+  private async requestEmbedding(
+    text: string,
+    taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY",
+    signal?: AbortSignal,
+  ): Promise<number[]> {
     // Client-side cancellation only: Gemini may still bill a request already sent.
     let response: EmbedContentResponse;
     try {

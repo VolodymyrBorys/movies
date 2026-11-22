@@ -1,3 +1,4 @@
+import { ragGenerationSkippedTotal } from "../../infrastructure/metrics.ts";
 import { geminiGenerationService } from "./generation/gemini-generation.service.ts";
 import { knowledgeBaseSearchService } from "./knowledge-base-search.service.ts";
 import { RagInputError } from "./rag.errors.ts";
@@ -31,6 +32,7 @@ export class RagService {
 
     // 2. Handle empty context without calling Gemini.
     if (!context.text) {
+      ragGenerationSkippedTotal.inc();
       return {
         answer: DEFAULT_INSUFFICIENT_CONTEXT_ANSWER,
         model: null,

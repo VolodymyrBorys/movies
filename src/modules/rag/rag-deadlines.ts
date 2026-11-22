@@ -4,3 +4,8 @@
 //
 // Search = embed (Gemini) + Qdrant query; should be well under a second when healthy.
 export const SEARCH_DEADLINE_MS = 5_000;
+
+// Answer = search + generate (up to 3 attempts with 1 s / 2 s backoff). Shorter than one
+// 60 s generation attempt timeout on purpose: the deadline, not the per-attempt timeout,
+// bounds what the client waits; it also caps how much retrying a single request can do.
+export const ANSWER_DEADLINE_MS = 30_000;

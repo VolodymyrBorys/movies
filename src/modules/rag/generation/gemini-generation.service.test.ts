@@ -13,10 +13,20 @@ vi.mock("../../../infrastructure/gemini/gemini.client.ts", () => ({
 
 vi.mock("node:timers/promises", () => ({ setTimeout: sleep }));
 
+// The project logger needs PG_* (env.ts); a silent pino keeps this test config-free.
+vi.mock("../../../infrastructure/logger.ts", async () => {
+  const { pino } = await import("pino");
+  return { logger: pino({ level: "silent" }) };
+});
+
 const { GeminiGenerationService } = await import(
   "./gemini-generation.service.ts"
 );
 const { RagUpstreamError } = await import("../rag.errors.ts");
+const { ragGenerationAttemptsTotal, ragStageDuration, ragTokensTotal } = await import(
+  "../../../infrastructure/metrics.ts"
+);
+const { metricValue } = await import("../../../test/metric-value.ts");
 const { RagNotConfiguredError } = await import("../../../config/rag.ts");
 
 type SleepOptions = { signal?: AbortSignal } | undefined;
@@ -246,6 +256,120 @@ describe("GeminiGenerationService", () => {
         service.generate({ ...input, signal: caller.signal }),
       ).rejects.toMatchObject({ name: "AbortError" });
       expect(generateContent).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("metrics", () => {
+    const attempts = (outcome: string) =>
+      metricValue(ragGenerationAttemptsTotal, { outcome });
+    const tokens = (type: string) => metricValue(ragTokensTotal, { type });
+    const stage = (outcome: string) =>
+      metricValue(ragStageDuration, { stage: "generate", outcome }, "_count");
+
+    async function snapshot() {
+      return {
+        ok: await attempts("ok"),
+        retryable: await attempts("retryable_error"),
+        error: await attempts("error"),
+        timeout: await attempts("timeout"),
+        cancelled: await attempts("cancelled"),
+        stageOk: await stage("ok"),
+        stageError: await stage("error"),
+        stageCancelled: await stage("cancelled"),
+      };
+    }
+
+    it("counts each attempt and one generate stage across retries", async () => {
+      generateContent
+        .mockRejectedValueOnce(apiError(503))
+        .mockRejectedValueOnce(apiError(429))
+        .mockResolvedValueOnce({ text: "answer" });
+      const before = await snapshot();
+
+      await service.generate(input);
+
+      const after = await snapshot();
+      expect(after.retryable - before.retryable).toBe(2);
+      expect(after.ok - before.ok).toBe(1);
+      expect(after.stageOk - before.stageOk).toBe(1);
+    });
+
+    it("counts a non-retryable failure as error, stage error", async () => {
+      generateContent.mockRejectedValue(apiError(400));
+      const before = await snapshot();
+
+      await expect(service.generate(input)).rejects.toThrow();
+
+      const after = await snapshot();
+      expect(after.error - before.error).toBe(1);
+      expect(after.stageError - before.stageError).toBe(1);
+    });
+
+    it("counts a per-attempt timeout as timeout", async () => {
+      vi.useFakeTimers();
+      generateContent.mockImplementation(pendingUntilAborted);
+      const before = await snapshot();
+
+      const assertion = expect(service.generate(input)).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+
+      expect((await snapshot()).timeout - before.timeout).toBe(1);
+    });
+
+    it("counts caller cancellation as cancelled, not error", async () => {
+      const caller = new AbortController();
+      generateContent.mockImplementation(async () => {
+        caller.abort();
+        throw apiError(503);
+      });
+      const before = await snapshot();
+
+      await expect(service.generate({ ...input, signal: caller.signal })).rejects.toThrow();
+
+      const after = await snapshot();
+      expect(after.cancelled - before.cancelled).toBe(1);
+      expect(after.retryable - before.retryable).toBe(0);
+      expect(after.stageCancelled - before.stageCancelled).toBe(1);
+      expect(after.stageError - before.stageError).toBe(0);
+    });
+
+    it("adds prompt, output and thoughts tokens from usageMetadata", async () => {
+      generateContent.mockResolvedValue({
+        text: "answer",
+        usageMetadata: {
+          promptTokenCount: 120,
+          candidatesTokenCount: 30,
+          thoughtsTokenCount: 7,
+          totalTokenCount: 157,
+        },
+      });
+      const before = {
+        prompt: await tokens("prompt"),
+        output: await tokens("output"),
+        thoughts: await tokens("thoughts"),
+      };
+
+      await service.generate(input);
+
+      expect((await tokens("prompt")) - before.prompt).toBe(120);
+      expect((await tokens("output")) - before.output).toBe(30);
+      expect((await tokens("thoughts")) - before.thoughts).toBe(7);
+    });
+
+    it("counts tokens of an empty (billed) response and ignores missing usage", async () => {
+      generateContent.mockResolvedValueOnce({
+        text: " ",
+        usageMetadata: { promptTokenCount: 50 },
+      });
+      const before = await tokens("prompt");
+
+      await expect(service.generate(input)).rejects.toThrow("empty response");
+      expect((await tokens("prompt")) - before).toBe(50);
+
+      generateContent.mockResolvedValueOnce({ text: "answer" });
+      await expect(service.generate(input)).resolves.toMatchObject({ answer: "answer" });
+      expect((await tokens("prompt")) - before).toBe(50);
     });
   });
 });

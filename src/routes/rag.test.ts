@@ -24,12 +24,19 @@ vi.mock("../infrastructure/redis.ts", () => ({
   },
 }));
 
-vi.mock("../modules/rag/rag-deadlines.ts", () => ({ SEARCH_DEADLINE_MS: 100 }));
+vi.mock("../modules/rag/rag-deadlines.ts", () => ({
+  SEARCH_DEADLINE_MS: 100,
+  ANSWER_DEADLINE_MS: 100,
+}));
 
-const { search } = vi.hoisted(() => ({ search: vi.fn() }));
+const { search, answer } = vi.hoisted(() => ({ search: vi.fn(), answer: vi.fn() }));
 
 vi.mock("../modules/rag/knowledge-base-search.service.ts", () => ({
   knowledgeBaseSearchService: { search },
+}));
+
+vi.mock("../modules/rag/rag-service.ts", () => ({
+  ragService: { answer },
 }));
 
 const { app } = await import("../app.ts");
@@ -84,9 +91,22 @@ function lastOptions(): SearchOptions {
   return options;
 }
 
+const answerResult = {
+  answer: "PostgreSQL replays WAL from the last checkpoint.",
+  model: "gemini-3.8-flash",
+  sources: [source],
+  metadata: {
+    retrievedChunks: 3,
+    includedChunks: 1,
+    contextLength: 57,
+    generationSkipped: false,
+  },
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   search.mockResolvedValue(searchResult);
+  answer.mockResolvedValue(answerResult);
 });
 
 describe("POST /v1/knowledge-base/search", () => {
@@ -224,6 +244,91 @@ describe("POST /v1/knowledge-base/search", () => {
         message: "Internal server error",
       });
     });
+  });
+});
+
+describe("POST /v1/rag/answer", () => {
+  const ANSWER = "/v1/rag/answer";
+
+  function lastAnswerOptions(): { signal: AbortSignal } {
+    const [, options] = answer.mock.lastCall as [unknown, { signal: AbortSignal }];
+    return options;
+  }
+
+  it("returns the answer, model, sources and metadata", async () => {
+    const res = await request(app).post(ANSWER).send({ question: "How does recovery work?" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ data: answerResult });
+  });
+
+  it("passes the trimmed question and only a request signal (no client-controlled retrieval)", async () => {
+    await request(app).post(ANSWER).send({ question: "  recovery?  " });
+
+    expect(answer.mock.lastCall?.[0]).toEqual({ question: "recovery?" });
+    const options = lastAnswerOptions();
+    expect(Object.keys(options)).toEqual(["signal"]);
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("returns 200 with the fallback when generation was skipped (empty context)", async () => {
+    const skipped = {
+      answer: "I don't have enough relevant information in the provided documents to answer this question.",
+      model: null,
+      sources: [],
+      metadata: { retrievedChunks: 0, includedChunks: 0, contextLength: 0, generationSkipped: true },
+    };
+    answer.mockResolvedValue(skipped);
+
+    const res = await request(app).post(ANSWER).send({ question: "unknown topic" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual(skipped);
+  });
+
+  it.each([
+    ["missing question", {}],
+    ["whitespace-only question", { question: "  " }],
+    ["question over 1000 chars", { question: "x".repeat(1_001) }],
+    ["retrieval options", { question: "q", retrieval: { limit: 50 } }],
+  ])("rejects %s with 400 before any upstream call", async (_name, body) => {
+    const res = await request(app).post(ANSWER).send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(answer).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 when Gemini stays unavailable after retries", async () => {
+    answer.mockRejectedValue(
+      new RagUpstreamError("generate", "generate failed: HTTP 503", { retryable: true }),
+    );
+
+    const res = await request(app).post(ANSWER).send({ question: "q" });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toEqual({
+      code: "DEPENDENCY_UNAVAILABLE",
+      message: "Upstream dependency unavailable",
+    });
+  });
+
+  it("answers 504 when the deadline passes during generation", async () => {
+    answer.mockImplementation(pendingUntilAborted);
+
+    const res = await request(app).post(ANSWER).send({ question: "q" });
+
+    expect(res.status).toBe(504);
+    expect(res.body.error.code).toBe("DEADLINE_EXCEEDED");
+  });
+
+  it("answers 503 RAG_NOT_CONFIGURED without config", async () => {
+    answer.mockRejectedValue(new RagNotConfiguredError());
+
+    const res = await request(app).post(ANSWER).send({ question: "q" });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("RAG_NOT_CONFIGURED");
   });
 });
 

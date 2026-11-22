@@ -77,6 +77,78 @@ for (const result of [
   outboxEventsTotal.inc({ result }, 0);
 }
 
+// --- RAG -------------------------------------------------------------------
+// Stage values mirror RagStage in src/modules/rag/rag.errors.ts (kept literal here so
+// infrastructure doesn't import modules).
+
+export type RagMetricStage = "embed" | "search" | "generate";
+/** cancelled = the caller's signal aborted (deadline, client disconnect or shutdown). */
+export type RagStageOutcome = "ok" | "error" | "cancelled";
+export type RagGenerationAttemptOutcome =
+  | "ok"
+  | "retryable_error"
+  | "error"
+  | "timeout"
+  | "cancelled";
+export type RagTokenType = "prompt" | "output" | "thoughts";
+
+const RAG_STAGES = ["embed", "search", "generate"] as const satisfies readonly RagMetricStage[];
+const RAG_STAGE_OUTCOMES = ["ok", "error", "cancelled"] as const satisfies readonly RagStageOutcome[];
+
+/**
+ * Wall time per pipeline stage. generate includes retries and backoff, so it is what the
+ * caller waited for. Buckets go to 60 s: Gemini latency is unknown (never measured) and
+ * the HTTP histogram stops at 5 s.
+ */
+export const ragStageDuration = new Histogram({
+  name: "rag_stage_duration_seconds",
+  help: "Duration of RAG pipeline stages (embed, search, generate) by outcome",
+  labelNames: ["stage", "outcome"] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60],
+  registers: [metricsRegistry],
+});
+
+export const ragGenerationSkippedTotal = new Counter({
+  name: "rag_generation_skipped_total",
+  help: "Answers returned without calling Gemini because the retrieved context was empty",
+  registers: [metricsRegistry],
+});
+
+/** One per Gemini generateContent call; retries = everything except the final attempt. */
+export const ragGenerationAttemptsTotal = new Counter({
+  name: "rag_generation_attempts_total",
+  help: "Gemini generation attempts by outcome",
+  labelNames: ["outcome"] as const,
+  registers: [metricsRegistry],
+});
+
+/** From Gemini usageMetadata; thoughts are billed as output on thinking models. */
+export const ragTokensTotal = new Counter({
+  name: "rag_tokens_total",
+  help: "Gemini generation tokens by type (from response usage metadata)",
+  labelNames: ["type"] as const,
+  registers: [metricsRegistry],
+});
+
+for (const stage of RAG_STAGES) {
+  for (const outcome of RAG_STAGE_OUTCOMES) {
+    ragStageDuration.zero({ stage, outcome });
+  }
+}
+ragGenerationSkippedTotal.inc(0);
+for (const outcome of [
+  "ok",
+  "retryable_error",
+  "error",
+  "timeout",
+  "cancelled",
+] as const satisfies readonly RagGenerationAttemptOutcome[]) {
+  ragGenerationAttemptsTotal.inc({ outcome }, 0);
+}
+for (const type of ["prompt", "output", "thoughts"] as const satisfies readonly RagTokenType[]) {
+  ragTokensTotal.inc({ type }, 0);
+}
+
 /**
  * When the backlog gauges were last refreshed. The two gauges above keep their last
  * value if sampling fails; alert on `time() - this > N` to catch stale backlog data.
