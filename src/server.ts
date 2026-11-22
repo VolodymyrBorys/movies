@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { config } from "./config/env.ts";
 import { logger } from "./infrastructure/logger.ts";
 import { markShuttingDown } from "./infrastructure/health.ts";
+import { abortInFlightRequests } from "./infrastructure/shutdown-signal.ts";
 import { PG } from "./infrastructure/postgres.ts";
 import { REDIS } from "./infrastructure/redis.ts";
 import {
@@ -78,7 +79,9 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
       await sleep(config.server.shutdownDelayMs);
     }
 
-    // 1. Перестати приймати нові HTTP-з'єднання.
+    // 1. Перестати приймати нові HTTP-з'єднання. Before that, abort slow in-flight work
+    //    (RAG upstream calls) so close() doesn't wait for it up to the forced exit.
+    abortInFlightRequests();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) reject(error);

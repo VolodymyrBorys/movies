@@ -1,5 +1,11 @@
+import type { QdrantClient } from "@qdrant/js-client-rest";
 import { getQdrantClient } from "../../../infrastructure/qdrant/qdrant.client.ts";
 import { embeddingService } from "../embedding/embedding.service.ts";
+import {
+  RagInputError,
+  RagUpstreamError,
+  toUpstreamError,
+} from "../rag.errors.ts";
 import type {
   QdrantDocumentPayload,
   QdrantSearchOptions,
@@ -14,7 +20,11 @@ function validatePayload(
   payload: Record<string, unknown> | null,
 ): QdrantDocumentPayload {
   if (!payload) {
-    throw new Error("Qdrant returned a point without payload");
+    throw new RagUpstreamError(
+      "search",
+      "Qdrant returned a point without payload",
+      { retryable: false },
+    );
   }
 
   const { documentId, content, source, chunkIndex, indexedAt } = payload;
@@ -26,7 +36,11 @@ function validatePayload(
     typeof chunkIndex !== "number" ||
     typeof indexedAt !== "string"
   ) {
-    throw new Error("Qdrant returned an invalid document payload");
+    throw new RagUpstreamError(
+      "search",
+      "Qdrant returned an invalid document payload",
+      { retryable: false },
+    );
   }
 
   return {
@@ -78,7 +92,9 @@ function validateOptions(options: QdrantSearchOptions): void {
   const { limit = DEFAULT_LIMIT, scoreThreshold } = options;
 
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
-    throw new Error(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+    throw new RagInputError(
+      `limit must be an integer between 1 and ${MAX_LIMIT}`,
+    );
   }
 
   if (
@@ -87,7 +103,7 @@ function validateOptions(options: QdrantSearchOptions): void {
       scoreThreshold < -1 ||
       scoreThreshold > 1)
   ) {
-    throw new Error("scoreThreshold must be a number between -1 and 1");
+    throw new RagInputError("scoreThreshold must be a number between -1 and 1");
   }
 }
 
@@ -102,7 +118,7 @@ export class QdrantSearchService {
     const normalizedQuery = query.trim();
 
     if (!normalizedQuery) {
-      throw new Error("Search query cannot be empty");
+      throw new RagInputError("Search query cannot be empty");
     }
 
     validateOptions(options);
@@ -145,18 +161,23 @@ export class QdrantSearchService {
     // raceWithSignal runs, so a check inside it would come too late.
     signal?.throwIfAborted();
 
-    const response = await raceWithSignal(
-      getQdrantClient().query(COLLECTION_NAME, {
-        query: queryVector,
-        limit,
-        with_payload: true,
-        ...(scoreThreshold !== undefined
-          ? { score_threshold: scoreThreshold }
-          : {}),
-        ...(must.length > 0 ? { filter: { must } } : {}),
-      }),
-      signal,
-    );
+    let response: Awaited<ReturnType<QdrantClient["query"]>>;
+    try {
+      response = await raceWithSignal(
+        getQdrantClient().query(COLLECTION_NAME, {
+          query: queryVector,
+          limit,
+          with_payload: true,
+          ...(scoreThreshold !== undefined
+            ? { score_threshold: scoreThreshold }
+            : {}),
+          ...(must.length > 0 ? { filter: { must } } : {}),
+        }),
+        signal,
+      );
+    } catch (error: unknown) {
+      throw toUpstreamError("search", error, signal);
+    }
 
     // 4. Convert Qdrant response into our domain result.
     return response.points.map((point) => ({

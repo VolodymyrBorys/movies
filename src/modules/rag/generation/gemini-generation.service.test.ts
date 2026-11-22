@@ -16,6 +16,8 @@ vi.mock("node:timers/promises", () => ({ setTimeout: sleep }));
 const { GeminiGenerationService } = await import(
   "./gemini-generation.service.ts"
 );
+const { RagUpstreamError } = await import("../rag.errors.ts");
+const { RagNotConfiguredError } = await import("../../../config/rag.ts");
 
 type SleepOptions = { signal?: AbortSignal } | undefined;
 type GenerateArgs = { model: string; contents: string; config: { abortSignal: AbortSignal } };
@@ -116,11 +118,14 @@ describe("GeminiGenerationService", () => {
       expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1_249]);
     });
 
-    it("rethrows the original error after the last attempt", async () => {
+    it("fails with a retryable generate error after the last attempt, keeping the cause", async () => {
       const error = apiError(503);
       generateContent.mockRejectedValue(error);
 
-      await expect(service.generate(input)).rejects.toBe(error);
+      const rejection = await service.generate(input).catch((e: unknown) => e);
+
+      expect(rejection).toBeInstanceOf(RagUpstreamError);
+      expect(rejection).toMatchObject({ stage: "generate", retryable: true, cause: error });
       expect(generateContent).toHaveBeenCalledTimes(3);
       expect(sleep).toHaveBeenCalledTimes(2);
     });
@@ -129,14 +134,32 @@ describe("GeminiGenerationService", () => {
       generateContent.mockRejectedValue(apiError(status));
 
       await expect(service.generate(input)).rejects.toThrow(`HTTP ${status}`);
-      expect(generateContent).toHaveBeenCalledTimes(1);
+      await expect(service.generate(input)).rejects.toMatchObject({
+        name: "RagUpstreamError",
+        stage: "generate",
+        retryable: false,
+      });
+      expect(generateContent).toHaveBeenCalledTimes(2);
       expect(sleep).not.toHaveBeenCalled();
     });
 
     it("does not retry an empty model response", async () => {
       generateContent.mockResolvedValue({ text: "   " });
 
-      await expect(service.generate(input)).rejects.toThrow("empty response");
+      await expect(service.generate(input)).rejects.toMatchObject({
+        name: "RagUpstreamError",
+        stage: "generate",
+        retryable: false,
+        message: "Gemini returned an empty response",
+      });
+      expect(generateContent).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry or wrap RagNotConfiguredError", async () => {
+      const error = new RagNotConfiguredError();
+      generateContent.mockRejectedValue(error);
+
+      await expect(service.generate(input)).rejects.toBe(error);
       expect(generateContent).toHaveBeenCalledTimes(1);
     });
 
@@ -156,9 +179,12 @@ describe("GeminiGenerationService", () => {
       vi.useFakeTimers();
       generateContent.mockImplementation(pendingUntilAborted);
 
-      const assertion = expect(service.generate(input)).rejects.toThrow(
-        "Gemini request timed out after 60000ms",
-      );
+      const assertion = expect(service.generate(input)).rejects.toMatchObject({
+        name: "RagUpstreamError",
+        stage: "generate",
+        retryable: true,
+        message: "Gemini request timed out after 60000ms",
+      });
       await vi.advanceTimersByTimeAsync(60_000);
       await assertion;
 

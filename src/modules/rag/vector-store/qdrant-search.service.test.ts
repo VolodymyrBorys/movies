@@ -25,6 +25,7 @@ vi.mock("../embedding/embedding.service.ts", () => ({
 }));
 
 const { QdrantSearchService } = await import("./qdrant-search.service.ts");
+const { RagInputError, RagUpstreamError } = await import("../rag.errors.ts");
 
 type QueryArgs = Record<string, unknown>;
 
@@ -121,6 +122,7 @@ describe("QdrantSearchService", () => {
       ["NaN scoreThreshold", "q", { scoreThreshold: Number.NaN }, "scoreThreshold must be"],
     ])("rejects %s before any external call", async (_name, q, options, message) => {
       await expect(service.search(q, options)).rejects.toThrow(message);
+      await expect(service.search(q, options)).rejects.toBeInstanceOf(RagInputError);
       expect(embedQuery).not.toHaveBeenCalled();
       expect(query).not.toHaveBeenCalled();
     });
@@ -142,6 +144,35 @@ describe("QdrantSearchService", () => {
         Promise.resolve({ points: [point("p1", 0.9, payload)] });
 
       await expect(service.search("question")).rejects.toThrow(message);
+      await expect(service.search("question")).rejects.toMatchObject({
+        name: "RagUpstreamError",
+        stage: "search",
+        retryable: false,
+      });
+    });
+
+    it.each([
+      ["HTTP 503", Object.assign(new Error("HTTP 503"), { status: 503 }), true],
+      ["client timeout", Object.assign(new Error("timeout"), { name: "QdrantClientTimeoutError" }), true],
+      ["HTTP 404", Object.assign(new Error("HTTP 404"), { status: 404 }), false],
+    ])("wraps a Qdrant %s as a search failure, keeping the cause", async (_name, error, retryable) => {
+      qdrant.respond = () => Promise.reject(error);
+
+      const rejection = await service.search("question").catch((e: unknown) => e);
+
+      expect(rejection).toMatchObject({
+        name: "RagUpstreamError",
+        stage: "search",
+        retryable,
+        cause: error,
+      });
+    });
+
+    it("does not re-wrap an embedding failure as a search failure", async () => {
+      const error = new RagUpstreamError("embed", "embed failed", { retryable: true });
+      embedQuery.mockRejectedValue(error);
+
+      await expect(service.search("question")).rejects.toBe(error);
     });
 
     it("does not log retrieved document content", async () => {

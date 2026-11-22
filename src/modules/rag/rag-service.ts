@@ -1,5 +1,6 @@
 import { geminiGenerationService } from "./generation/gemini-generation.service.ts";
 import { knowledgeBaseSearchService } from "./knowledge-base-search.service.ts";
+import { RagInputError } from "./rag.errors.ts";
 import type {
   RagAnswerInput,
   RagAnswerOptions,
@@ -17,7 +18,7 @@ export class RagService {
     const question = input.question.trim();
 
     if (!question) {
-      throw new Error("Question cannot be empty");
+      throw new RagInputError("Question cannot be empty");
     }
 
     // 1. Retrieve knowledge and build context.

@@ -4,6 +4,7 @@ import type {
   KnowledgeBaseSearchOptions,
   KnowledgeBaseSearchResult,
 } from "./knowledge-base-search.types.ts";
+import { RagInputError } from "./rag.errors.ts";
 import { qdrantSearchService } from "./vector-store/qdrant-search.service.ts";
 
 export class KnowledgeBaseSearchService {
@@ -14,7 +15,7 @@ export class KnowledgeBaseSearchService {
     const query = input.query.trim();
 
     if (!query) {
-      throw new Error("Search query cannot be empty");
+      throw new RagInputError("Search query cannot be empty");
     }
 
     // 1. Retrieve relevant chunks from Qdrant (defaults + validation inside).

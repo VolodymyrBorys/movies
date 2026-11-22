@@ -8,6 +8,8 @@ vi.mock("../../../infrastructure/gemini/gemini.client.ts", () => ({
 }));
 
 const { EmbeddingService } = await import("./embedding.service.ts");
+const { RagInputError, RagUpstreamError } = await import("../rag.errors.ts");
+const { RagNotConfiguredError } = await import("../../../config/rag.ts");
 
 type EmbedArgs = {
   model: string;
@@ -92,8 +94,51 @@ describe("EmbeddingService", () => {
     );
   });
 
-  it("propagates SDK errors unchanged", async () => {
-    const error = new Error("network down");
+  it("rejects empty text with RagInputError", async () => {
+    await expect(service.embedQuery("   ")).rejects.toBeInstanceOf(RagInputError);
+  });
+
+  it.each([
+    ["no embeddings", {}],
+    ["NaN values", embeddingResponse(vector.map(() => Number.NaN))],
+  ])("reports a response with %s as a non-retryable embed failure", async (_name, response) => {
+    embedContent.mockResolvedValue(response);
+
+    await expect(service.embedQuery("question")).rejects.toMatchObject({
+      name: "RagUpstreamError",
+      stage: "embed",
+      retryable: false,
+    });
+  });
+
+  it.each([
+    ["HTTP 503", Object.assign(new Error("HTTP 503"), { status: 503 }), true],
+    ["network error", new TypeError("fetch failed"), true],
+    ["HTTP 400", Object.assign(new Error("HTTP 400"), { status: 400 }), false],
+  ])("wraps an SDK %s as an embed failure, keeping the cause", async (_name, error, retryable) => {
+    embedContent.mockRejectedValue(error);
+
+    const rejection = await service.embedQuery("question").catch((e: unknown) => e);
+
+    expect(rejection).toBeInstanceOf(RagUpstreamError);
+    expect(rejection).toMatchObject({ stage: "embed", retryable, cause: error });
+  });
+
+  it("passes an SDK error through unchanged when the caller's signal aborted", async () => {
+    const controller = new AbortController();
+    const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
+    embedContent.mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(abortError);
+    });
+
+    await expect(
+      service.embedQuery("question", controller.signal),
+    ).rejects.toBe(abortError);
+  });
+
+  it("passes RagNotConfiguredError through unchanged", async () => {
+    const error = new RagNotConfiguredError();
     embedContent.mockRejectedValue(error);
 
     await expect(service.embedQuery("question")).rejects.toBe(error);

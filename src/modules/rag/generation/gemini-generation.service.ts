@@ -1,5 +1,11 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { getGeminiClient } from "../../../infrastructure/gemini/gemini.client.ts";
+import {
+  getHttpStatus,
+  RagInputError,
+  RagUpstreamError,
+  toUpstreamError,
+} from "../rag.errors.ts";
 import type {
   GenerateAnswerInput,
   GenerateAnswerResult,
@@ -29,30 +35,8 @@ Rules:
 8. Answer in the same language as the user's question.
 `;
 
-function getHttpStatus(error: unknown): number | undefined {
-  if (typeof error !== "object" || error === null) {
-    return undefined;
-  }
-
-  const candidate = error as {
-    status?: unknown;
-    code?: unknown;
-    response?: { status?: unknown };
-  };
-
-  const status = candidate.status ?? candidate.response?.status;
-
-  if (typeof status === "number") {
-    return status;
-  }
-
-  if (typeof candidate.code === "number") {
-    return candidate.code;
-  }
-
-  return undefined;
-}
-
+// Retry policy of this service (unchanged): only these HTTP statuses are retried here.
+// Classification for callers (503 vs 502) is isTransientUpstreamError in rag.errors.ts.
 function isRetryableError(error: unknown): boolean {
   const status = getHttpStatus(error);
   return status !== undefined && RETRYABLE_STATUSES.has(status);
@@ -68,11 +52,11 @@ export class GeminiGenerationService {
     const context = input.context.trim();
 
     if (!question) {
-      throw new Error("Question cannot be empty");
+      throw new RagInputError("Question cannot be empty");
     }
 
     if (!context) {
-      throw new Error("Context cannot be empty");
+      throw new RagInputError("Context cannot be empty");
     }
 
     const prompt = `
@@ -126,7 +110,12 @@ ${question}
         const answer = response.text?.trim();
 
         if (!answer) {
-          throw new Error("Gemini returned an empty response");
+          // Not retried (known issue #8 in docs/progress/rag.md).
+          throw new RagUpstreamError(
+            "generate",
+            "Gemini returned an empty response",
+            { retryable: false },
+          );
         }
 
         console.log(`[Gemini] Completed in ${duration}ms`);
@@ -142,9 +131,10 @@ ${question}
         }
 
         if (controller.signal.aborted) {
-          throw new Error(
+          throw new RagUpstreamError(
+            "generate",
             `Gemini request timed out after ${REQUEST_TIMEOUT_MS}ms`,
-            { cause: error },
+            { retryable: true, cause: error },
           );
         }
 
@@ -152,7 +142,7 @@ ${question}
         const isLastAttempt = attempt === MAX_ATTEMPTS;
 
         if (!retryable || isLastAttempt) {
-          throw error;
+          throw toUpstreamError("generate", error);
         }
 
         const exponentialDelay = INITIAL_RETRY_DELAY_MS * 2 ** (attempt - 1);
