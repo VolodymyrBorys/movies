@@ -5,9 +5,64 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-22 · Block D (P7): RAG config, typed errors, search + answer endpoints
+
+Branch `p7-rag-endpoints` (from `master` at `3351a88`): `3a86823` (D0), `174cf89` (D1),
+`612c6ff` (D2), `e8accff` (D3) + this docs commit. Not merged, not pushed.
+
+### Worked on / completed
+- D0: optional RAG config `src/config/rag.ts` (`GEMINI_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`,
+  `QDRANT_TIMEOUT_MS` = 5 s); lazy `getGeminiClient()`/`getQdrantClient()`; no `loadEnvFile`.
+- D1: `RagInputError`, `RagUpstreamError{stage, retryable}`; `createRequestSignal` (deadline /
+  client disconnect / shutdown); `toRagHttpError` → 400/499/502/503/504; abort of in-flight work
+  right before `server.close()`.
+- D2: `POST /v1/knowledge-base/search` → `{ data: { chunks, retrievedChunks, includedChunks } }`.
+- D3: `POST /v1/rag/answer` → `{ data: RagAnswerResult }`; metrics `rag_stage_duration_seconds`,
+  `rag_generation_skipped_total`, `rag_generation_attempts_total`, `rag_tokens_total`; pino logger
+  in generation.
+
+### Key decisions (why)
+- **No live Gemini runs** (owner): billable and mostly 503. Behavior is implemented as designed and
+  verified with mocks only (recorded in CLAUDE.md).
+- RAG config separate from `env.ts`: `env.ts` requires `PG_*` at import; RAG scripts shouldn't.
+  Partial config fails fast; none → API starts, RAG routes answer 503 `RAG_NOT_CONFIGURED`.
+- Abort reason decides the HTTP status, not the thrown error: Gemini SDK aborts with its own
+  controller and loses our reason. First reason wins.
+- Shutdown aborts in-flight work at `server.close()`, not at `markShuttingDown()`, so requests in
+  the `SHUTDOWN_DELAY_MS` window are still served.
+- 502 for non-retryable upstream failures (invalid response, 4xx) vs 503 for transient ones.
+- RagInputError → `VALIDATION_ERROR`, same code as the Zod boundary.
+- Search returns raw `chunks` (new additive `BuiltContext.chunks`), not prompt-formatted text.
+- Deadlines 5 s / 30 s are hypotheses; 30 s < one 60 s generation attempt by design.
+
+### Verification
+- Assistant: `npx tsc -p .` exit 0; unit tests 229/229; mutation checks on client getters,
+  abort-reason precedence, `writableFinished`, wrap-after-abort, attempt/token metrics.
+- Owner: `npx vitest run src/routes` passed (incl. `rag.test.ts`) after D2 and D3.
+- Not run: any RAG script; live Gemini/Qdrant; shutdown path in `server.ts` (typecheck only).
+
+### Known issues / findings
+- RAG scripts importing generation need `PG_*` again (logger → `env.ts`); also import
+  `metrics.ts` (`collectDefaultMetrics`) — effect on script exit not checked.
+- `usageMetadata` field names checked against `@google/genai@3.0.0` types only; its JSDoc says
+  "not supported in Gemini API" → `rag_tokens_total` may stay 0.
+- Aborted requests (499) never reach HTTP metrics (recorded on `finish`).
+- CLAUDE.md "Current state" still says RAG has no HTTP endpoint (update proposed);
+  `docs/progress/rag.md` not updated yet (D5).
+- `.env.example` needs the RAG variables (owner).
+
+### Next steps (in order)
+1. D4: synchronous `POST /v1/movies/:id/review` (primary read, 404, review prompt in
+   `rag/generation/`, shared retry loop, `operation` label on generation metrics, 30 s, not persisted).
+2. D5: `docs/progress/rag.md`; D6: escape prompt delimiters (issue #5). Then merge the branch.
+3. B: P2 k6 baseline. 4. P5 RabbitMQ (async review worker).
+
+---
+
 ## 2026-11-19 (session 2) · Block C: movies CRUD + optimistic concurrency
 
-Branch `p3-movies-crud`: `a46140a` … `0a92c75`, merged into `master` (not pushed).
+Branch `p3-movies-crud`: `a46140a` … `0a92c75` + docs `3351a88`, fast-forwarded into `master`;
+pushed and merged branches deleted by the owner.
 
 ### Worked on / completed
 - Order agreed with the owner: C → D (RAG endpoint + sync review) → B (P2) → P5 RabbitMQ.
@@ -28,6 +83,17 @@ Branch `p3-movies-crud`: `a46140a` … `0a92c75`, merged into `master` (not push
   within one ALTER TABLE).
 - Express default weak ETag on JSON bodies kept (list keeps 304); harmless for If-Match.
 
+### Files
+- Created: `migrations/1795116743325_movies_status_version_backfill.sql`,
+  `migrations/1795116743326_movies_status_version_not_null.sql`, `src/modules/movies/etag.ts`,
+  `src/modules/movies/etag.test.ts`, `src/modules/movies/validation/movie-id-params.ts`.
+- Modified: `src/routes/movies.ts`, `src/modules/movies/{movies.controller,movies.repository,movies.service}.ts`,
+  `src/modules/movies/validation/{create-movie,update-movie}.ts`, `src/models/movies.ts`,
+  `scripts/migrate.ts`, `scripts/seed-movies.sql`, `src/test/integration-global-setup.ts`,
+  tests (`src/routes/movies.test.ts`, `src/routes/movies.int.test.ts`,
+  `src/workers/cache-invalidation.int.test.ts`), `CLAUDE.md`, `docs/learning-roadmap.md`,
+  `docs/session-log.md`.
+
 ### Verification
 - Assistant: `npx tsc -p .` exit 0; unit tests 142/142 (incl. `etag.test.ts`, 15).
 - Owner: `movies.test.ts` 50/50; `npm run test:integration` 36/36; migrations on nebula (1M):
@@ -41,12 +107,14 @@ Branch `p3-movies-crud`: `a46140a` … `0a92c75`, merged into `master` (not push
 - `MovieRow` type is inaccurate (`release_year: string`); untouched.
 
 ### Next steps (in order)
-1. `git push` (owner); delete merged branch `p3-movies-crud` (and old merged
-   `p0-health-config`, `p1-observability`).
-2. D: P7 — RAG HTTP endpoint + synchronous `POST /v1/movies/:id/review`; plan first
-   (Gemini is billable → approval for live runs).
-3. B: P2 k6 baseline (k6 install → approval). 4. P5 RabbitMQ.
-5. Deferred: P1 drills 2–3, replica decision + lag alert.
+1. D (P7), plan only, no code until approved: read `docs/progress/rag.md` (open issues),
+   `src/modules/rag/` entry points; propose `POST /v1/knowledge-base/search`,
+   `POST /v1/rag/answer` and synchronous `POST /v1/movies/:id/review` (Zod limits, deadline +
+   client-disconnect `AbortSignal`, typed errors → 400/503/504, stage metrics). Known blocker:
+   Qdrant/Gemini config is outside `env.ts` (roadmap §4.2) — decide whether to move it first.
+   Live Gemini runs are billable → owner approval.
+2. B: P2 k6 baseline (k6 install → approval). 3. P5 RabbitMQ (async review worker).
+4. Deferred: P1 drills 2–3, replica decision + lag alert; optional `If-Match` mutation check.
 
 ---
 
