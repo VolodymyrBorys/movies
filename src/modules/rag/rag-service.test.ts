@@ -23,10 +23,25 @@ const filledContext: BuiltContext = {
   sources: [
     { id: "p1", documentId: "doc-1", source: "manual.md", chunkIndex: 0, score: 0.9 },
   ],
+  chunks: [
+    {
+      id: "p1",
+      documentId: "doc-1",
+      source: "manual.md",
+      chunkIndex: 0,
+      score: 0.9,
+      content: "WAL replay.",
+    },
+  ],
   includedChunks: 1,
 };
 
-const emptyContext: BuiltContext = { text: "", sources: [], includedChunks: 0 };
+const emptyContext: BuiltContext = {
+  text: "",
+  sources: [],
+  chunks: [],
+  includedChunks: 0,
+};
 
 describe("RagService", () => {
   const service = new RagService();

@@ -2,6 +2,7 @@ import type { QdrantSearchResult } from "../vector-store/qdrant.types.ts";
 import type {
   BuiltContext,
   ContextBuilderOptions,
+  ContextChunk,
   ContextSource,
 } from "./context.types.ts";
 
@@ -26,6 +27,7 @@ export class ContextBuilderService {
       return {
         text: "",
         sources: [],
+        chunks: [],
         includedChunks: 0,
       };
     }
@@ -48,6 +50,7 @@ export class ContextBuilderService {
 
     // 5. Build context while respecting character budget.
     const sources: ContextSource[] = [];
+    const chunks: ContextChunk[] = [];
     const sections: string[] = [];
 
     let currentLength = 0;
@@ -65,18 +68,21 @@ export class ContextBuilderService {
       sections.push(section);
       currentLength = nextLength;
 
-      sources.push({
+      const contextSource: ContextSource = {
         id: result.id,
         documentId: result.payload.documentId,
         source: result.payload.source,
         chunkIndex: result.payload.chunkIndex,
         score: result.score,
-      });
+      };
+      sources.push(contextSource);
+      chunks.push({ ...contextSource, content: result.payload.content });
     }
 
     return {
       text: sections.join("\n\n"),
       sources,
+      chunks,
       includedChunks: sections.length,
     };
   }

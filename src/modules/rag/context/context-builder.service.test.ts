@@ -29,8 +29,23 @@ describe("ContextBuilderService", () => {
     expect(builder.build([])).toEqual({
       text: "",
       sources: [],
+      chunks: [],
       includedChunks: 0,
     });
+  });
+
+  it("returns included chunks with raw content, in the same order as sources", () => {
+    const context = builder.build([
+      result(1, 0.5, 0, "low"),
+      result(2, 0.9, 1, "high"),
+      result(3, 0.7, 2, "x".repeat(50)),
+    ], { maxContextChars: 200 });
+
+    expect(context.chunks.map((c) => c.content)).toEqual(["high", "low"]);
+    expect(context.chunks.map(({ content: _content, ...source }) => source)).toEqual(
+      context.sources,
+    );
+    expect(context.chunks).toHaveLength(context.includedChunks);
   });
 
   it("returns an empty context when all chunks have empty content", () => {

@@ -52,7 +52,7 @@ describe("toRagHttpError", () => {
   });
 
   it.each([
-    ["RagInputError", new RagInputError("Question cannot be empty"), 400, "VALIDATION_FAILED"],
+    ["RagInputError", new RagInputError("Question cannot be empty"), 400, "VALIDATION_ERROR"],
     ["RagNotConfiguredError", new RagNotConfiguredError(), 503, "RAG_NOT_CONFIGURED"],
     ["retryable upstream", upstream(true), 503, "DEPENDENCY_UNAVAILABLE"],
     ["non-retryable upstream", upstream(false), 502, "DEPENDENCY_FAILED"],

@@ -16,7 +16,7 @@ import { RagInputError, RagUpstreamError } from "./rag.errors.ts";
 // | signal: deadline                          | 504    | DEADLINE_EXCEEDED       |
 // | signal: client disconnected               | 499    | CLIENT_CLOSED_REQUEST   |
 // | signal: server shutting down              | 503    | SERVICE_SHUTTING_DOWN   |
-// | RagInputError                             | 400    | VALIDATION_FAILED       |
+// | RagInputError                             | 400    | VALIDATION_ERROR        |
 // | RagNotConfiguredError                     | 503    | RAG_NOT_CONFIGURED      |
 // | RagUpstreamError, retryable               | 503    | DEPENDENCY_UNAVAILABLE  |
 // | RagUpstreamError, not retryable           | 502    | DEPENDENCY_FAILED       |
@@ -66,7 +66,8 @@ export function toRagHttpError(error: unknown, signal?: AbortSignal): AppError {
 
   if (error instanceof RagInputError) {
     // Our own messages (e.g. "Question cannot be empty"): safe to expose.
-    return fail(400, ErrorCode.VALIDATION_FAILED, error.message, error);
+    // Same code as the Zod boundary (utils/validate-query.ts), so a 400 looks the same.
+    return fail(400, "VALIDATION_ERROR", error.message, error);
   }
 
   if (error instanceof RagNotConfiguredError) {
