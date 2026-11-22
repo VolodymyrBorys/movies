@@ -1,6 +1,6 @@
 # RAG — progress
 
-_Last updated: 2026-11-22 (D5) · HEAD at writing: `e311a3a` (`master`) · Code is the source of truth._
+_Last updated: 2026-11-22 (D6) · HEAD at writing: `bac6506` + D6 (branch `p7-prompt-delimiters`) · Code is the source of truth._
 _Previous version (2026-11-16, `9c123e0`): core pipeline only, no HTTP. See git history of this file._
 
 ## Status
@@ -9,7 +9,7 @@ _Previous version (2026-11-16, `9c123e0`): core pipeline only, no HTTP. See git 
 - Without RAG config the API starts and RAG routes answer **503 `RAG_NOT_CONFIGURED`**.
 - **No live Gemini runs** (owner decision, 2026-11-22: billable, frequent 503). Gemini-dependent behavior is implemented as designed and verified **only with mocked clients**. Successful generation has still never been observed (every manual run in 2026-11-16 got `503 UNAVAILABLE`).
 - Retrieval was verified manually against real Gemini embed + Qdrant on 2026-11-16 (before the HTTP layer); not re-run since.
-- Tests (assistant, 2026-11-22): `npx tsc -p .` exit 0; RAG-related unit tests **166/166** in 13 files (table below). HTTP tests `src/routes/{rag,movie-review}.test.ts` passed (owner, after D2–D4; counts not reported). Integration tests after the merge: reported OK by the owner (2026-11-22; count not reported).
+- Tests (assistant, 2026-11-22): `npx tsc -p .` exit 0; RAG-related unit tests **197/197** in 14 files after D6 (table below; 166/166 in 13 files at D5). HTTP tests `src/routes/{rag,movie-review}.test.ts` passed (owner, after D2–D4; counts not reported). Integration tests after the merge: reported OK by the owner (2026-11-22; count not reported).
 
 ## Architecture
 
@@ -58,7 +58,8 @@ Indexing (scripts only): document → chunking → embedDocument → QdrantDocum
 | `src/modules/rag/rag-http-errors.ts` | `toRagHttpError`: signal reason first, then error type → `AppError` |
 | `src/modules/rag/rag-metrics.ts` | `timeStage()`: stage histogram with outcome `ok` / `error` / `cancelled` |
 | `src/modules/rag/generation/gemini-generate.ts` | **Single `generateContent` call site**: retry loop, per-attempt timeout, attempt/token metrics, logs |
-| `src/modules/rag/generation/gemini-generation.service.ts` | RAG answer prompt (`<context>` block), temperature 0.2, 2048 output tokens |
+| `src/modules/rag/prompt-safety.ts` | `neutralizeDelimiters`, `toSingleLine` for untrusted text in prompts (D6) |
+| `src/modules/rag/generation/gemini-generation.service.ts` | RAG answer prompt (`<context>` + `<question>` blocks), temperature 0.2, 2048 output tokens |
 | `src/modules/rag/generation/movie-review-generation.service.ts` | Review prompt (`<movie>` block), temperature 0.7, 1024 output tokens |
 | `src/modules/rag/rag-service.ts`, `knowledge-base-search.service.ts`, `context/`, `embedding/`, `vector-store/` | Core pipeline (unchanged in shape since 2026-11-16; now typed errors + stage timing) |
 | `src/config/rag.ts` | Optional RAG config; `RagNotConfiguredError` |
@@ -102,6 +103,24 @@ Indexing (scripts only): document → chunking → embedDocument → QdrantDocum
 - Review parameters (owner, 2026-11-22): same model as answers (`GENERATION_MODEL`), temperature 0.7, 1024 output tokens, 80–150 words. Movie fields go inside `<movie>…</movie>` and the system instruction marks them as untrusted data.
 - Review is allowed for any movie status; it is **not persisted** and every call is billed (`// LAB:`; P5 makes it async: 202 + job, idempotent regeneration, storage). `movieVersion` in the response = the movie's ETag value the review was generated from. No `generatedAt`: API dates come from SQL (microseconds); response time is in the `Date` header.
 
+### Prompt injection: threat model (D6, 2026-11-22)
+
+| Untrusted input | Who controls it | Where it goes |
+|---|---|---|
+| Chunk `content`, `source`, `documentId` | Whoever can write to Qdrant (today: ingestion scripts run by the owner) | `<context>` block of the answer prompt |
+| `question` | The API caller | `<question>` block of the answer prompt |
+| Movie `title`, `description` | Any client of `POST`/`PATCH /v1/movies` (no auth) | `<movie>` block of the review prompt |
+
+- **Closed (structural):** untrusted text can't open or close a block. `neutralizeDelimiters` (`src/modules/rag/prompt-safety.ts`) escapes the `<` of any `context`/`movie`/`question` tag as `&lt;`: any case, whitespace inside the tag, attributes, unterminated `</context`. Code samples (`Promise<T>`, `a < b`) and other tags stay verbatim (option A, "escape every `<`", was rejected for that reason). One-line headers (`[Source: …]`, `[Document: …]`, `Title: …`) go through `toSingleLine`, so a value can't add fake header lines.
+- **Where:** neutralization happens where each prompt is built (`gemini-generation.service.ts` for context + question, `movie-review-generation.service.ts` for title + description) — the code that owns the tags; it also covers callers that pass `context` directly. `ContextBuilderService` only makes header values single-line; `/knowledge-base/search` returns raw, unescaped `chunks` (API unchanged).
+- **Not closed:**
+  - instructions written inside the data (e.g. "ignore previous rules") — the model can still follow them; mitigated only by the system instruction marking data as untrusted;
+  - Unicode look-alikes (`＜/context＞`) that a model may read as a tag;
+  - header-like lines inside chunk `content` (`[Source: trusted.md]` in the body) — only header *values* are single-line. API `sources` come from Qdrant metadata, not from model output, so they stay correct.
+- **Impact today:** the model has no tools and the output is returned as text only, so the worst case is a wrong/misleading answer or review (e.g. a phishing link) or a leaked system prompt — not an action. This changes in P8 (tool calling): mutating tools need confirmation and idempotency keys, and an injection eval set.
+- **Verification:** structural only (unit tests on the built prompt, mutation-checked). Effect on real model behavior is **not** measured: no live Gemini runs (owner decision).
+- Rejected for now: random per-request boundaries ("spotlighting", option C) — not testable for effect without live runs/evals; revisit in P8. Separate `parts`/JSON (option D) — still one text for the model.
+
 ### Search response
 - Returns raw `chunks` (new additive field `BuiltContext.chunks`), not prompt-formatted context text. One client knob, `limit`, sets both retrieval limit and `maxChunks`.
 
@@ -119,6 +138,7 @@ Indexing (scripts only): document → chunking → embedDocument → QdrantDocum
 ## Bugs found and fixed
 
 - `8e0c876` (2026-11-16) — Qdrant query started even when cancelled during embedding, and a later Qdrant failure became an unhandled rejection (fatal in `server.ts`). Regression tests.
+- D6 mutation checks (2026-11-22, all caught, code restored): no neutralization of context / question / title / description, title not single-line, `source` not single-line, regex without `\b`, case-sensitive regex.
 - Block D: no production bugs found after the fact; behavior was proven by mutation checks during development (client getters, abort-reason precedence, `writableFinished`, wrap-after-abort, attempt/token metrics, review `operation` label, tokens per operation, `<movie>` block — all caught, code restored).
 
 ## Tests
@@ -133,11 +153,12 @@ Unit (Vitest, no network; Gemini/Qdrant clients, `node:timers/promises` replaced
 | `modules/rag/rag.errors.test.ts` | 20 | status extraction, transient classification, `toUpstreamError` pass-through rules |
 | `modules/rag/rag-http-errors.test.ts` | 15 | full mapping table, signal reason over thrown error, fixed messages |
 | `modules/rag/rag-metrics.test.ts` | 4 | `timeStage` outcomes incl. cancelled |
-| `context/context-builder.service.test.ts` | 11 | empty input/content, sort+dedup, metadata, minScore, maxChunks, char budget, `chunks` output |
+| `prompt-safety.test.ts` | 27 | tag variants escaped (case, spaces, attributes, unterminated), non-tags untouched (`<contextual>`, `Promise<T>`), idempotent; line-break variants (D6) |
+| `context/context-builder.service.test.ts` | 12 | empty input/content, sort+dedup, metadata, minScore, maxChunks, char budget, `chunks` output, single-line header values with raw chunks (D6) |
 | `embedding/embedding.service.test.ts` | 16 | task types, 768 dims, abortSignal, invalid vectors, typed errors, stage timing |
 | `vector-store/qdrant-search.service.test.ts` | 24 | request building, validation, mapping, invalid payload, no body logging, cancellation incl. unhandled rejection, typed errors |
-| `generation/gemini-generation.service.test.ts` | 25 | retry/backoff/jitter, non-retryable 4xx, timeout, cancellation, attempt/token metrics, no prompt in logs |
-| `generation/movie-review-generation.service.test.ts` | 9 | prompt `<movie>` block, params, `operation: "review"`, empty title |
+| `generation/gemini-generation.service.test.ts` | 26 | retry/backoff/jitter, non-retryable 4xx, timeout, cancellation, attempt/token metrics, no prompt in logs; `<question>` block + delimiters in context/question can't close blocks (D6) |
+| `generation/movie-review-generation.service.test.ts` | 11 | prompt `<movie>` block, params, `operation: "review"`, empty title; `</movie>` in title/description, single-line title (D6) |
 | `knowledge-base-search.service.test.ts` | 5 | pass-through of options/signal, retrievedChunks |
 | `rag-service.test.ts` | 9 | empty-context skip (+ skipped metric), sources/metadata, signal forwarding, errors |
 
@@ -153,7 +174,7 @@ Numbering of the 2026-11-16 list is kept; resolved items are struck through.
 2. `minScore` default 0 → weak context still calls Gemini. Needs an eval set to pick a threshold.
 3. Chunks are very short (3 chunks ≈ 722 chars of context) — review chunking params.
 4. ~~No max length for `question`/`query`~~ — **resolved (D2/D3)**: 1000 chars, `limit` ≤ 20.
-5. **Prompt injection via delimiters (→ D6):** retrieved content can contain `</context>`, and movie `title`/`description` can contain `</movie>`, and close the block. Untrusted-data instructions exist in both system prompts, but delimiters are not escaped/neutralized.
+5. ◐ **Prompt injection via delimiters — structural part resolved (D6):** `</context>`, `</movie>`, `</question>` in untrusted text are neutralized; header fields are single-line. Remaining (see "Prompt injection: threat model"): instructions inside data, Unicode look-alike tags, header-like lines inside chunk content.
 6. ~~Plain `Error` everywhere~~ — **resolved (D1)**: `RagInputError`, `RagUpstreamError{stage, retryable}`, HTTP mapping separate.
 7. One invalid Qdrant point fails the whole search (`validatePayload` throws → 502).
 8. Empty Gemini response is not retried (→ 502); 408 not in retryable statuses (deliberate, revisit if seen).
@@ -173,7 +194,6 @@ New (block D):
 
 ## Not implemented
 
-- D6: delimiter escaping for `<context>` / `<movie>` + documented threat model (plan first).
 - Retrieval quality evaluation (golden set, recall@k / MRR, `minScore`, chunking).
 - Async review via RabbitMQ (P5): 202 + job, prefetch as rate limit, DLX on 503, persisted reviews.
 - Ingestion via queue with deterministic point IDs (P5).

@@ -1,3 +1,4 @@
+import { toSingleLine } from "../prompt-safety.ts";
 import type { QdrantSearchResult } from "../vector-store/qdrant.types.ts";
 import type {
   BuiltContext,
@@ -106,12 +107,15 @@ export class ContextBuilderService {
     });
   }
 
+  // Header values are kept on one line so a payload can't add fake header lines.
+  // Delimiter tags are neutralized where the prompt is built (gemini-generation.service.ts),
+  // so `text` here and the raw `chunks` returned by search stay unescaped.
   private formatChunk(result: QdrantSearchResult): string {
     const { documentId, source, chunkIndex, content } = result.payload;
 
     return [
-      `[Source: ${source}]`,
-      `[Document: ${documentId}]`,
+      `[Source: ${toSingleLine(source)}]`,
+      `[Document: ${toSingleLine(documentId)}]`,
       `[Chunk: ${chunkIndex}]`,
       `[Relevance score: ${result.score.toFixed(4)}]`,
       "",

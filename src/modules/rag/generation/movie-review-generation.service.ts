@@ -1,3 +1,4 @@
+import { neutralizeDelimiters, toSingleLine } from "../prompt-safety.ts";
 import { RagInputError } from "../rag.errors.ts";
 import { generateWithRetries } from "./gemini-generate.ts";
 
@@ -35,16 +36,21 @@ export interface MovieReviewResult {
   model: string;
 }
 
-// LAB: simplified — fields are inserted as-is; a title/description containing "</movie>"
-// can break out of the block (same issue as </context>, docs/progress/rag.md #5 → D6).
+// Title and description are written by API clients (POST/PATCH /v1/movies): untrusted.
+// Neither may open or close a block (prompt-safety.ts); the title is a one-line header, so
+// it can't add fake "Release year:" lines. The description is the last field: line breaks
+// are kept.
 function buildPrompt(input: MovieReviewInput): string {
-  const description = input.description?.trim() || "(no description)";
+  const title = neutralizeDelimiters(toSingleLine(input.title.trim()));
+  const description = neutralizeDelimiters(
+    input.description?.trim() || "(no description)",
+  );
 
   return `
 Write a review of this movie.
 
 <movie>
-Title: ${input.title.trim()}
+Title: ${title}
 Release year: ${input.releaseYear}
 Duration: ${input.durationMinutes} minutes
 Description: ${description}

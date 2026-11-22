@@ -5,9 +5,31 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
-## 2026-11-22 (session 2) · D5: `docs/progress/rag.md` for the HTTP layer
+## 2026-11-22 (session 2) · D5: `docs/progress/rag.md` for the HTTP layer; D6: prompt delimiters
 
-Branch `p7-rag-docs` (from `master` at `e311a3a`).
+Branch `p7-rag-docs` (from `master` at `e311a3a`): `bac6506` (D5). Branch `p7-prompt-delimiters`
+(from `p7-rag-docs`): D6. Not merged, not pushed.
+
+### D6 (owner approved: option B, `<question>` wrapper, `&lt;` replacement, new branch)
+- `src/modules/rag/prompt-safety.ts`: `neutralizeDelimiters` (escapes `<` of `context`/`movie`/
+  `question` tags: any case, inner whitespace, attributes, unterminated; idempotent; leaves
+  `<contextual>`, `Promise<T>`) and `toSingleLine` for one-line header values.
+- Answer prompt: context + question neutralized; question now in `<question>…</question>`;
+  system instruction rule 9 names the tag. Review prompt: title (single line) + description
+  neutralized. Context builder: `source`/`documentId` single-line.
+- Deviation from the plan (stated to the owner): delimiter neutralization of chunk content is
+  done where the answer prompt is built, not in `ContextBuilderService.formatChunk` — the tags
+  live there, and direct callers of generation are covered too. Search `chunks` stay raw.
+- Threat model in `docs/progress/rag.md` (not closed: instructions inside data, Unicode
+  look-alikes, header-like lines inside chunk content; no tools → no actions possible).
+- Files: created `src/modules/rag/prompt-safety{,.test}.ts`; modified
+  `src/modules/rag/context/context-builder.service{,.test}.ts`,
+  `src/modules/rag/generation/{gemini-generation,movie-review-generation}.service{,.test}.ts`,
+  `docs/progress/rag.md`, `docs/learning-roadmap.md`, `docs/session-log.md`.
+- Verification (assistant): `npx tsc -p .` exit 0; unit tests 269/269 (`src/modules src/config
+  src/infrastructure src/workers src/utils`), RAG-related 197/197; 8 mutation checks all caught,
+  code restored. Not run: `src/routes` tests (owner; prompt-only change, HTTP untouched),
+  integration tests, live Gemini — effect on model behavior is not measured.
 
 ### Corrections to the previous entry
 - `p7-rag-endpoints` **was merged into `master` and pushed** by the owner (`master` =
@@ -25,9 +47,11 @@ Branch `p7-rag-docs` (from `master` at `e311a3a`).
 - Test descriptions in `rag.md` checked against test names; docs only, no code changed.
 
 ### Next steps (in order)
-1. D6: plan, then escape/neutralize prompt delimiters for `<context>` and `<movie>` with tests.
+1. Owner: `npx vitest run src/routes` on `p7-prompt-delimiters`; push + merge it (contains D5 + D6).
 2. Owner: RAG vars in `.env.example`.
 3. B: P2 k6 baseline (k6 install → approval). 4. P5 RabbitMQ (async review worker).
+5. Deferred RAG: review status rule, rate limit / token budget, alerts for `rag_*`, injection
+   eval set + random boundaries (P8).
 
 ---
 
