@@ -11,7 +11,11 @@
     "migrate:down": "node --env-file-if-exists=.env scripts/migrate.ts down",
     "migrate:create": "node-pg-migrate create --migrations-dir migrations --migration-file-language sql",
     "obs:up": "docker compose -f observability/compose.yml --env-file observability/.env up -d",
-    "obs:down": "docker compose -f observability/compose.yml --env-file observability/.env down"
+    "obs:down": "docker compose -f observability/compose.yml --env-file observability/.env down",
+    "k6:typecheck": "tsc -p load/k6",
+    "k6:smoke": "k6 run load/k6/smoke.ts",
+    "k6:cached": "k6 run load/k6/read-cached.ts",
+    "k6:cold": "k6 run load/k6/read-cold.ts"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +24,7 @@
   "devDependencies": {
     "@types/autocannon": "^7.12.7",
     "@types/express": "^5.0.6",
+    "@types/k6": "2.3.1",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
     "autocannon": "^8.0.0",

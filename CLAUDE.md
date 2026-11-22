@@ -11,6 +11,7 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 - Integration tests: `npm run test:integration` (`vitest.integration.config.ts`, `src/**/*.int.test.ts`, helpers in `src/test/`), real PG/Redis; DB name must end with `_test` (default `movies_test`, must exist; globalSetup applies migrations), Redis forced to db 15. 36/36 passed (owner, 2026-11-19); the owner runs them (sandbox can't reach local ports).
 - Metrics (`src/infrastructure/metrics.ts`, label `service="movies-api"`): HTTP RED, `cache_requests_total`, `pg_pool_connections`, `outbox_*` (backlog gauges sampled by the worker every 10 s). Labelled counters are pre-created at 0 — keep that when adding label values.
 - Observability (P1): `observability/compose.yml` (Prometheus :9090, Alertmanager :9093 with null receiver, Grafana :3001, postgres/redis exporters; app/PG/Redis run on the host). Always `docker compose -f observability/compose.yml --env-file observability/.env`. Alert rules + promtool tests in `observability/prometheus/`; runbooks and drill log in `docs/progress/observability.md`; drill watcher `node scripts/watch-alerts.ts`.
+- Load tests (P2): k6 v2 scenarios in TypeScript `load/k6/*.ts` (own `load/k6/tsconfig.json`); npm scripts `k6:typecheck`, `k6:smoke`, `k6:cached`, `k6:cold` (params after `--`, e.g. `npm run k6:cached -- -e RATE=200 -e RUN_LABEL=r200`). Run by the owner per `docs/perf/baseline.md` (sandbox can't reach local ports); summaries in `docs/perf/runs/`.
 - Session history and next steps: `docs/session-log.md`.
 - DB schema lives in `migrations/` (node-pg-migrate, SQL files). Run via `npm run migrate:up|down` (`scripts/migrate.ts`, primary only, `lock_timeout=5s`). Never edit an existing migration; add a new one. Existing local DB: baseline marked applied with `--fake`. Runner uses one transaction per migration (`singleTransaction: false`) — required for expand/contract. A hook blocks edits to any file in `migrations/`, even new uncommitted ones: get the SQL right before writing it, otherwise ask the owner to delete the file.
 - Seed: `scripts/seed-movies.sql` (psql only; deterministic, idempotent, rollback in header; legacy rows use `'draft'`/`1` since status/version are NOT NULL). App DB holds 1M seeded movies (2026-11-19); plans and findings in `docs/progress/postgres.md`.
@@ -76,7 +77,7 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 
 ## Verification
 
-- Type check: `npx tsc -p .` (tsconfig has `noEmit`, so it writes nothing).
+- Type check: `npx tsc -p .` (tsconfig has `noEmit`, so it writes nothing). k6 scenarios (`load/k6/`, excluded from the root config): `npm run k6:typecheck` (= `tsc -p load/k6`).
 - Tests: `npm test` (`vitest run`, no network). Integration: `npm run test:integration` (real PG/Redis). Alert rules: `promtool test rules` (command in `docs/progress/observability.md`). There are no lint/typecheck scripts.
 - In tests, don't return promises through `vi.fn()` when checking unhandled rejections: Vitest spies attach handlers to returned promises and hide them.
 - For small, well-scoped changes, skip the formal plan; plan first only when the change has architectural or data impact.

@@ -5,10 +5,103 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-22 (session 2, cont.) · B (P2): k6 scenarios P2.0–P2.2
+
+Branch `p2-k6-baseline` (from `master` at `63eb93c`; D5 + D6 merged and pushed by the owner,
+`src/routes` tests passed on `p7-prompt-delimiters` — owner). Committed after the green P2.0
+smoke (owner decision); P2.1/P2.2 not run yet.
+
+### Worked on / completed
+- `load/k6/lib/common.ts`: env parsing, SLO thresholds (p99 < 250 ms, failed < 0.5%) on
+  `phase:load` submetrics only (setup traffic excluded), `dropped_iterations` threshold, own
+  `handleSummary` (JSON in `docs/perf/runs/`, compact stdout; no remote jslib import).
+- `smoke.ts` (1 VU, read-only incl. page 2, by id + ETag, 404), `read-cached.ts` (first page,
+  constant arrival rate), `read-cold.ts` (cursors walked in setup with `limit=100`, requested
+  with limits 10..59 → 100k never-used keys; refuses runs that would exceed them).
+- `docs/perf/baseline.md`: caveats, setup, run commands (stairs), PromQL, empty result tables.
+- Rewritten from JS to TypeScript (owner, option A): k6 v2.4.0 runs `.ts` directly;
+  `@types/k6@2.3.1` (devDependency, exact, installed by the owner); own `load/k6/tsconfig.json`
+  (extends root strictness, `types: ["k6"]`, no Node types); root `tsconfig.json` gets
+  `exclude: ["node_modules", "load"]`. New check: `npx tsc -p load/k6`.
+- npm scripts (owner request): `k6:typecheck` (`tsc -p load/k6`), `k6:smoke`, `k6:cached`,
+  `k6:cold`; parameters after `--` (`npm run k6:cached -- -e RATE=200 -e RUN_LABEL=r200`).
+  `CLAUDE.md`: "Current state" line on load tests, Verification uses `npm run k6:typecheck`.
+  `docs/perf/baseline.md` still shows plain `k6 run …` (both forms work).
+- **P2.0 smoke passed** (owner, 2026-11-22 18:07Z): 180 requests, failed 0%, checks 100%,
+  p95 7.97 ms, p99 22.46 ms, dropped 0; summary `docs/perf/runs/2026-11-22T18-07-55-311Z-smoke.json`
+  (only the green run is committed). Grafana view of the window not reported yet.
+- Two earlier smoke runs failed: `readyz 200` 0/30, everything else 30/30. `/readyz` answered
+  503 `shuttingDown: true` while list/by id worked. Owner: that API was started with
+  `npm run dev` (`--watch`) — against the runbook. Exact mechanism (why a process in shutdown
+  kept serving > 5 min although `server.ts` force-exits after 15 s) not reproduced.
+- Smoke fixes from that: first failing `/readyz` body is printed (`console.warn`, names the
+  failing dependency), smoke uses shared `SUMMARY_TREND_STATS` (stdout showed `p90 n/a`);
+  `load/k6/k6-globals.d.ts` declares k6's `console` (missing in `@types/k6`).
+
+### Key decisions (why)
+- Owner: no k6 remote write yet (compose change); writes later only on test-created rows.
+- Separate tsconfig for k6: k6 is not Node (no `process`/`fs`/Node timers); one shared config
+  would allow Node APIs in scenarios and leak k6 globals (`__ENV`) into app types.
+- Parameters via `k6 run -e NAME=value`, not shell env: `k6 inspect` ignores system env vars
+  (found while checking the guard); `-e` behaves the same for every command.
+- One rate per run ("stairs") instead of one long ramp: clean per-rate numbers from the
+  summary, and Prometheus (15 s scrape) gets ≥ 8 points per step.
+- Cold without `FLUSHDB`: unique (cursor, limit) keys + 90 s pause > TTL between runs.
+
+### Verification
+- Assistant (JS version): `handleSummary` exercised in Node with fake k6 data (load submetric
+  used, `setup_data` stripped); metric names checked against prom-client and the Grafana
+  dashboard.
+- Assistant (TS version): `k6 inspect` parses all 3 scenarios (k6 v2.4.0, init code only, no
+  requests): options/thresholds as expected; `-e RATE=1000 -e DURATION=2m` → unique-key guard
+  throws; `-e RATE=abc` → validation error; `npx tsc -p .` exit 0 with the new exclude.
+- Assistant (after the owner installed `@types/k6@2.3.1`): `npx tsc -p load/k6` first failed
+  (TS7022, circular inference `cursor → query → res → next` in `read-cold.ts` setup loop) →
+  explicit `query: string`, `next: unknown`; then exit 0. Mutation check: `rate: "fast"` and
+  `process.env` in a scenario → TS2322 / TS2591 (Node APIs rejected), file restored.
+  `npx tsc -p .` exit 0; unit tests 269/269; `k6 inspect` OK for all 3 scenarios.
+- Assistant (npm scripts): `npm run k6:typecheck` exit 0; `k6 inspect load/k6/read-cached.ts
+  -e RATE=321` → `"rate": 321` (k6 accepts `-e` after the script path, so `npm run … -- -e …`
+  works). `k6:smoke` / `k6:cached` / `k6:cold` themselves not run.
+- Owner (smoke runs): thresholds fail (exit 99) and pass as designed; `handleSummary` writes into
+  `docs/perf/runs/`; `exec.scenario.iterationInTest` works (readyz diagnostic printed once).
+  After the smoke fixes: `npm run k6:typecheck` 0, `npx tsc -p .` 0, `k6 inspect` OK.
+- Not verified yet: `phase:load` submetric thresholds and `dropped_iterations` under arrival-rate
+  load (P2.1/P2.2), `read-cold.ts` setup walk.
+
+### Files
+- Created: `load/k6/{smoke,read-cached,read-cold}.ts`, `load/k6/lib/common.ts`,
+  `load/k6/tsconfig.json`, `load/k6/k6-globals.d.ts`, `docs/perf/baseline.md`,
+  `docs/perf/runs/.gitkeep`, `docs/perf/runs/2026-11-22T18-07-55-311Z-smoke.json`.
+- Modified: `tsconfig.json` (`exclude`), `package.json` (`@types/k6` by the owner; `k6:*` scripts
+  by the assistant) + `package-lock.json`, `CLAUDE.md` (Current state: load tests; Verification:
+  `npm run k6:typecheck`), `docs/learning-roadmap.md`, `docs/session-log.md`.
+
+### Known issues / blockers
+- Assistant can't run k6 against the API or read Prometheus (sandbox blocks local ports).
+  `npm run <script>` works; `npm view`/`install` fail (sandbox blocks writes to `~/.npm`; npm's
+  "root-owned files" message is misleading — no `chown`).
+- Results will be relative (generator, app, PG, Redis, observability on one laptop).
+- No host CPU exporter: PostgreSQL / k6 CPU must be read manually (Activity Monitor / `top`).
+- Open (low priority): under `--watch`, a process with `shuttingDown=true` kept serving with
+  working PG. Possible `shutdown()` bug; check later: Ctrl+C under k6 load (no `--watch`) →
+  process must exit ≤ 15 s.
+- Untracked, not committed: failed smoke summary `docs/perf/runs/2026-11-22T17-57-50-908Z-smoke.json`
+  (owner may delete it).
+
+### Next steps (in order)
+1. Owner: check Grafana for the green smoke window (18:07:24–18:07:55Z).
+2. Owner (API without `--watch`): P2.1 / P2.2 stairs per `docs/perf/baseline.md`; share the summary lines, Prometheus
+   values for each window and CPU readings → assistant fills the result tables and findings.
+3. P2.3 mixed read/write (rows created/deleted by the test), P2.4 pool sizes, P2.5 version-bump
+   storm, P2.6 spike, P2.7 soak, P2.8 report + alert thresholds.
+
+---
+
 ## 2026-11-22 (session 2) · D5: `docs/progress/rag.md` for the HTTP layer; D6: prompt delimiters
 
 Branch `p7-rag-docs` (from `master` at `e311a3a`): `bac6506` (D5). Branch `p7-prompt-delimiters`
-(from `p7-rag-docs`): D6. Not merged, not pushed.
+(from `p7-rag-docs`): `63eb93c` (D6). Merged into `master` and pushed by the owner later in the session.
 
 ### D6 (owner approved: option B, `<question>` wrapper, `&lt;` replacement, new branch)
 - `src/modules/rag/prompt-safety.ts`: `neutralizeDelimiters` (escapes `<` of `context`/`movie`/

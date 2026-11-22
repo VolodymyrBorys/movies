@@ -1,10 +1,10 @@
 # Learning Roadmap — Movies Production-Engineering Lab
 
 _Created: 2026-11-16 · HEAD at writing: `19744cd` · Baseline: `npx tsc -p .` exit 0, `npm test` 70/70 passed._
-_Last updated: 2026-11-22 (D6) · `master` at `e311a3a` (`p7-rag-endpoints` merged and pushed by the owner); D5 + D6 on branch `p7-prompt-delimiters`, not merged · Session notes: `docs/session-log.md`._
+_Last updated: 2026-11-22 (end of session 2) · `master` at `63eb93c` (D0–D6 merged and pushed by the owner); P2.0 committed on branch `p2-k6-baseline` (not merged) · Session notes: `docs/session-log.md`._
 _Code is the source of truth. Everything below "Current implementation status" is a **plan**, not a description of what exists._
 
-**Current phase: P1 (in progress; drills 2–3 and replica deferred by the owner); P0 done except optional items; Phase 3 "C" block done early (CRUD + optimistic concurrency, 2026-11-19).** Order decided by the owner (2026-11-19): **D** — P7 RAG endpoint + synchronous movie review → **B** — P2 k6 baseline → **P5** RabbitMQ (async review worker). **D in progress (P7, 2026-11-22):** D0 RAG config in `src/config/rag.ts` + lazy clients, D1 typed errors + request-scoped signal, D2 `POST /v1/knowledge-base/search`, D3 `POST /v1/rag/answer` + RAG stage metrics, D4 synchronous `POST /v1/movies/:id/review` + `operation` label on generation metrics — done and merged into `master` (owner; integration tests OK after the merge). D5 `docs/progress/rag.md` rewritten for the HTTP layer — done. D6 neutralization of prompt delimiters (`<context>`, `<movie>`, new `<question>`) + threat model — done (branch `p7-prompt-delimiters`, on top of `p7-rag-docs`; not merged). **Next task:** owner merges `p7-prompt-delimiters` (contains D5 + D6), then **B** — P2 k6 baseline (k6 install → approval). **No live Gemini runs** (owner, 2026-11-22): Gemini-dependent behavior is verified with mocks only.
+**Current phase: P2 (block B, in progress); P1 in progress with drills 2–3 and replica deferred by the owner; P0 done except optional items; Phase 3 "C" block done early (CRUD + optimistic concurrency, 2026-11-19).** Order decided by the owner (2026-11-19): **D** — P7 RAG endpoint + synchronous movie review → **B** — P2 k6 baseline → **P5** RabbitMQ (async review worker). **D done (P7, 2026-11-22), merged into `master` (owner, `63eb93c`):** D0 RAG config in `src/config/rag.ts` + lazy clients, D1 typed errors + request-scoped signal, D2 `POST /v1/knowledge-base/search`, D3 `POST /v1/rag/answer` + RAG stage metrics, D4 synchronous `POST /v1/movies/:id/review` + `operation` label on generation metrics, D5 `docs/progress/rag.md` for the HTTP layer, D6 neutralization of prompt delimiters (`<context>`, `<movie>`, new `<question>`) + threat model. Owner: integration tests OK after the D0–D4 merge; `src/routes` tests passed on D6. **B in progress (P2, branch `p2-k6-baseline`, committed, not merged):** k6 scenarios P2.0 smoke, P2.1 cached reads, P2.2 cold reads written in TypeScript (`load/k6/*.ts`, own `load/k6/tsconfig.json`, `@types/k6@2.3.1`), runbook in `docs/perf/baseline.md`; npm scripts `k6:typecheck`/`k6:smoke`/`k6:cached`/`k6:cold`; **P2.0 smoke passed** (owner, 2026-11-22: 0% failed, checks 100%; API must run without `--watch`). **Next task:** P2.1/P2.2 stairs (`npm run k6:cached|k6:cold -- -e RATE=…`) and fill the result tables; then P2.3+ (mixed writes on test-created rows, pool sizes, version-bump storm, spike, soak). **No live Gemini runs** (owner, 2026-11-22): Gemini-dependent behavior is verified with mocks only.
 
 ---
 
@@ -143,7 +143,7 @@ Originally verified by reading the code at `19744cd`; rows updated through `aa53
 - RabbitMQ (no code, no dependency).
 - ~~Prometheus server config, Grafana dashboards, alert rules, exporters~~ — **added 2026-11-17** (`observability/`); verification partly done (Phase 1 → Status).
 - Distributed tracing; Elasticsearch/Kibana.
-- k6 (or equivalent) scenarios.
+- ◐ k6 scenarios: smoke passed, cached and cold reads written (2026-11-22, `load/k6/`), not run yet; mixed/spike/soak missing.
 - AI agent, tool calling, MCP, agent evals.
 - Kubernetes manifests, Gateway API/Envoy, TLS.
 - Terraform, AWS, CI/CD.
@@ -258,6 +258,8 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 - Find the knee: increase arrival rate until p99 or errors break the SLO; identify which resource saturated first (event loop lag, PG pool, PG CPU, Redis).
 - Compare `PG_POOL_MAX` 2 / 10 / 50 under the same load; explain the curve.
 - Measure the effect of a list-version bump under load (all list keys become cold at once).
+
+**Status (2026-11-22).** Owner decisions: open model only; no k6 → Prometheus remote write for now (summary JSON in `docs/perf/runs/` + PromQL on the server side); writes (P2.3+) only on rows the test creates and deletes, 1M seed untouched; first step P2.0–P2.2. Written in TypeScript (owner decision): `load/k6/{smoke,read-cached,read-cold}.ts`, `load/k6/lib/common.ts` (SLO thresholds on `phase:load` requests only, `dropped_iterations` = invalid run), own `load/k6/tsconfig.json` (`npm run k6:typecheck` = `tsc -p load/k6`, `@types/k6@2.3.1`), npm scripts `k6:smoke`/`k6:cached`/`k6:cold` (params after `--`), runbook + PromQL + empty result tables in `docs/perf/baseline.md`. k6 v2.4.0 installed; `k6 inspect` parses all scenarios. P2.0 smoke passed (owner, 2026-11-22, `docs/perf/runs/2026-11-22T18-07-55-311Z-smoke.json`); P2.1/P2.2 not run yet.
 
 **Expected outcomes.** A baseline report (`docs/perf/baseline.md`): throughput, p50/p95/p99, saturation point, bottleneck with evidence. Capacity estimate per pod.
 
@@ -498,7 +500,7 @@ Tracks after P2 can interleave: **backend** (P3–P6), **AI** (P7–P8), **platf
 | Integration        | `npm run test:integration`, real PG/Redis      | SQL vs schema, transactions, outbox, cache      | exists, 36/36 passed (owner, 2026-11-19) |
 | Migration          | up → down → up on a real DB                    | Rollback path exists                            | done manually (owner, 2026-11-16); expand/contract on 1M rows (nebula, owner, 2026-11-19) |
 | Failure injection  | stop/pause containers, latency injection       | Fallbacks, retries, alerts behave as designed   | P1+               |
-| Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2                |
+| Load               | k6 with thresholds                             | SLO under defined load; capacity                | P2: smoke/cached/cold scenarios written + typechecked (`npm run k6:typecheck`); smoke passed, cached/cold not run yet (2026-11-22) |
 | Query performance  | `EXPLAIN (ANALYZE, BUFFERS)` before/after      | Perf claims are measured                        | first plan recorded (keyset vs OFFSET, 1M rows, 2026-11-19); P3 |
 | Messaging          | real broker, kill/crash drills                 | At-least-once, idempotency, DLQ                 | P5                |
 | Observability      | `promtool test rules`, drills via `scripts/watch-alerts.ts` | Alerts fire and resolve           | P1 (rule tests pass; 2 of ~5 drills done), P6 |

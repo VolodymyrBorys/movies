@@ -44,5 +44,7 @@
     "erasableSyntaxOnly": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true
-  }
+  },
+  // k6 scenarios are not Node code: checked by their own config (`npx tsc -p load/k6`).
+  "exclude": ["node_modules", "load"]
 }
