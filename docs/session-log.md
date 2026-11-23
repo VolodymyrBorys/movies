@@ -5,7 +5,7 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
-## 2026-11-23 · B (P2): cached stairs; P5 planned
+## 2026-11-23 · B (P2): cached stairs; P5 planned; P5.0 done
 
 Branch `p2-k6-baseline` (not merged).
 
@@ -32,24 +32,40 @@ Branch `p2-k6-baseline` (not merged).
 - `shutdown()` under `--watch` question from 2026-11-22 still open.
 - Untracked, not committed: failed smoke `docs/perf/runs/2026-11-22T17-57-50-908Z-smoke.json`.
 
-### Later the same day
+### Later the same day: P5.0 (branch `p5-rabbitmq`, commit `41eef19`)
 - Owner merged `p2-k6-baseline` into `master` (`92d7bb8`, checked with `git ls-remote`), created
-  `p5-rabbitmq`, removed `@types/amqplib`, set `RABBITMQ_URL=amqp://localhost:5672` in `.env`.
-- **P5.0 code done, uncommitted** (details, decisions, failure modes: `docs/progress/messaging.md`):
-  `src/config/rabbitmq.ts`, `src/infrastructure/rabbitmq.ts` (amqplib built-in recovery instead
-  of a hand-written loop), `scripts/rabbitmq-ping.ts`, Prometheus job `rabbitmq` (:15692).
-  Assistant: `npx tsc -p .` 0, unit tests 282/282 without `src/routes` (13 new), 4 mutations
-  caught, `promtool check config` SUCCESS. Not verified: live broker, recovery, Prometheus target.
+  `p5-rabbitmq`, removed `@types/amqplib`, set `RABBITMQ_URL=amqp://localhost:5672` in `.env`,
+  runs RabbitMQ locally via Homebrew.
+- **P5.0 done** (details, decisions, failure modes: `docs/progress/messaging.md`):
+  `src/config/rabbitmq.ts` (optional `RABBITMQ_URL`), `src/infrastructure/rabbitmq.ts`
+  (amqplib 2.x built-in recovery instead of a hand-written loop — assistant's decision, recorded;
+  5 startup retries then exit, unbounded after first connect, 30 s cap; listeners before the first
+  attempt; URL never logged), `scripts/rabbitmq-ping.ts`, Prometheus job `rabbitmq` (:15692).
+- Bug found by the owner's first ping run: `connectRabbitMq` defaulted to the root logger, which
+  imports `env.ts` (`PG_*` required) → broker-only script failed. Fixed: logger is a required option.
+- Verification — assistant: `npx tsc -p .` 0; unit tests 282/282 without `src/routes` (13 new;
+  route tests need port binding, owner runs them); 4 mutations caught; `promtool check config`
+  SUCCESS; ping without `PG_*` reaches connect attempts. Owner: live ping OK.
+- Branches: heads of `p2-k6-baseline` and `p7-prompt-delimiters` verified as ancestors of `master`
+  (`git merge-base --is-ancestor`). Local `p2-k6-baseline` deleted (`git branch -d`); the sandbox
+  blocked the `.git/config` update, so a stale `[branch "p2-k6-baseline"]` section remains
+  (`git config --remove-section branch.p2-k6-baseline`). Remote branches: owner deletes.
+- Files (P5.0 commit): `src/config/rabbitmq{,.test}.ts`, `src/infrastructure/rabbitmq{,.test}.ts`,
+  `scripts/rabbitmq-ping.ts`, `observability/prometheus/prometheus.yml`, `package.json`,
+  `package-lock.json` (`amqplib@^2.4.1`), `docs/progress/messaging.md`, `CLAUDE.md`, this log.
 
-- Owner's first ping run failed on `PG_*`: `connectRabbitMq` defaulted to the root logger
-  (imports `env.ts`). Fixed: logger is a required option. Owner re-ran: ping OK. P5.0 committed.
-- Branches `p2-k6-baseline`, `p7-prompt-delimiters`: heads verified as ancestors of `master`
-  (`git merge-base --is-ancestor`) before deletion.
+### Not verified / open
+- Prometheus target `rabbitmq` UP; recovery against a real broker (stop/start during a run).
+- `RABBITMQ_URL=` not yet in `.env.example` (assistant can't read `.env*`).
+- `p5-rabbitmq` not pushed; remote `p2-k6-baseline` / `p7-prompt-delimiters` not deleted yet.
 
 ### Next steps
-1. Owner: confirm Prometheus target `rabbitmq` UP; optionally stop/start the broker during a ping
-   run (recovery); add `RABBITMQ_URL=` to `.env.example` (assistant can't read `.env*`).
-2. P5.1: migration `review_jobs` + `message_outbox` (plan in roadmap Phase 5).
+1. Owner: `git push origin --delete p2-k6-baseline p7-prompt-delimiters`, `git fetch --prune`,
+   `git push -u origin p5-rabbitmq`; confirm the Prometheus target; add `RABBITMQ_URL=` to
+   `.env.example`.
+2. P5.1: assistant shows the full SQL for one migration (`review_jobs` + `message_outbox`,
+   partial unique index on `(movie_id, movie_version)` for queued/running/succeeded) → owner
+   approves → file written once (migrations hook) → owner runs `migrate:up/down` on a disposable DB.
 
 ---
 
