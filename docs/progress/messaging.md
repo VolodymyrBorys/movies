@@ -1,12 +1,12 @@
 # Messaging (P5): RabbitMQ, outbox relay, async review worker
 
-_Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/learning-roadmap.md` → Phase 5 "Plan and decisions". No live Gemini: the review generator is mocked in tests; a dev fake generator comes with the consumer (P5.4)._
+_Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/learning-roadmap.md` → Phase 5 "Plan and decisions". No live Gemini: the review generator is mocked in tests and stubbed by default at runtime (`src/modules/rag/gemini-stub.ts`, returns "message from gemini"); configurable latency / 503 share for the exercises comes with the consumer (P5.4)._
 
 ## Status
 
 | Step | State |
 |---|---|
-| P5.0 broker + config + connection | done: unit-tested; live `scripts/rabbitmq-ping.ts` OK (owner, 2026-11-23); Prometheus target not confirmed yet |
+| P5.0 broker + config + connection | done: unit-tested; live `scripts/rabbitmq-ping.ts` OK (owner, 2026-11-23); Prometheus target `rabbitmq` UP after `rabbitmq-plugins enable rabbitmq_prometheus` (owner, 2026-11-23; the plugin is off by default in Homebrew, management on :15672 is a different plugin) |
 | P5.1 schema (`review_jobs`, `message_outbox`) | done: migration `1795432527618_review_jobs_message_outbox.sql`; integration 36/36 and `migrate:up` on the app DB (owner, 2026-11-23); up → down → up on a disposable DB not reported |
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
 | P5.3 outbox relay (publisher confirms) | not started |

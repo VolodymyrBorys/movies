@@ -5,6 +5,66 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-23 (session 2) · P5.1 schema, P5.2 async review API, Gemini stubs
+
+Branch `p5-rabbitmq`: `dd57434` (P5.1), `4cf17fb` (P5.2), `57d7b59` (stubs), owner's
+`b35a557` (`src/modules/reviews/review-flow.txt`). Pushed by the owner; not merged.
+
+### Completed
+- Prometheus target `rabbitmq` UP: `rabbitmq_prometheus` was disabled (Homebrew default;
+  management on :15672 is a separate plugin). Owner enabled it.
+- **P5.1:** `migrations/1795432527618_review_jobs_message_outbox.sql`, SQL approved by the owner
+  before writing. `review_jobs` (status CHECK, lease ⇔ running, result ⇔ succeeded,
+  finished_at ⇔ terminal, partial unique `(movie_id, movie_version)` for queued/running/succeeded,
+  FK `ON DELETE CASCADE` + `movie_id` index) and `message_outbox` (claim/lease/retry columns like
+  `cache_invalidation_outbox` + `message_id`, `routing_key`, `payload jsonb`). The integration
+  `TRUNCATE` now includes both tables (otherwise the FK breaks it).
+- **P5.2:** `POST /v1/movies/:id/review` → one transaction: SELECT version → `INSERT ... ON
+  CONFLICT DO NOTHING` → outbox row, or the existing job (at most 2 rounds). 202 + `Location`
+  for new/active jobs, 200 for succeeded, 404 also on FK `23503`. `GET /v1/review-jobs/:id`
+  (primary, camelCase, no `last_error`/lease). Sync controller deleted. Date helper
+  `src/utils/sql-dates.ts` shared with movies (format unchanged).
+- **Gemini stubs** (owner request): answer, review and `embedQuery` run real code up to the SDK
+  call and return a static result ("message from gemini" / model "stub" / constant unit
+  vector). `embedDocument` throws. On by default; `{ geminiStub: false }` in code for real calls.
+
+### Decisions
+- Owner: all 7 P5.1 schema decisions as proposed (cascade, text + CHECK, lease in the job,
+  DB attempts authoritative, `routing_key`, `message_id`, relay order `(available_at, id)`);
+  P5.2: 200 for succeeded, shared date helper, delete the sync controller.
+- Stub as a constructor option, not a bare early `return` (keeps the real path testable) and
+  not an env flag (no config value can turn on billing). `embedDocument` refuses so stub
+  vectors never reach the real Qdrant collection.
+- Result delivery: polling the job (`Location`). Webhook / SSE compared and deferred.
+
+### Verification
+- Assistant: `npx tsc -p .` 0; unit tests 293/293 (`src/config src/infrastructure src/modules
+  src/workers src/utils`). Mutation checks (caught, restored): stub default off in review (2 failed),
+  answer (1 failed), embeddings (3 failed).
+- Owner: `npm run test:integration` 36/36 with the new migration on `movies_test`;
+  `migrate:up --dry-run` + `migrate:up` on the app DB; after P5.2 `src/routes` and
+  integration tests green (counts not reported; expected 49 integration).
+- Not done: up → down → up of P5.1 on a disposable DB; mutation check of `ON CONFLICT` /
+  dedupe (needs the owner's integration run); job ↔ outbox atomicity on a failed outbox
+  insert; any live run of the stubs.
+
+### Known issues
+- Jobs stay `queued` until P5.3/P5.4 exist; no signal for that yet (P5.5).
+- RAG scripts that ingest (`embedDocument`) now fail by design; `scripts/test-embed.ts`,
+  `test-gemini-generation.ts` return the stub.
+- `git push` is blocked in the sandbox (no GitHub credentials) → owner pushes.
+- Stale `[branch "p2-k6-baseline"]` in `.git/config`; `RABBITMQ_URL=` in `.env.example`
+  unconfirmed; remote `p2-k6-baseline` / `p7-prompt-delimiters` deletion unconfirmed.
+
+### Next steps
+1. P5.3 plan (no code until approved): worker process entry point (separate from `server.ts`),
+   relay claim on `message_outbox` (SKIP LOCKED + lease, order `(available_at, id)`),
+   ConfirmChannel, mark published only after confirm, retry/backoff/dead-letter, exchange
+   declaration (topic exchange name), `message_id` as AMQP messageId, metrics hooks for P5.5.
+2. Then P5.4 consumer + topology (quorum queue, TTL retry queues, DLX/DLQ, superseded check).
+
+---
+
 ## 2026-11-23 · B (P2): cached stairs; P5 planned; P5.0 done
 
 Branch `p2-k6-baseline` (not merged).
