@@ -1,6 +1,6 @@
 # Messaging (P5): RabbitMQ, outbox relay, async review worker
 
-_Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/learning-roadmap.md` → Phase 5 "Plan and decisions". No live Gemini: the review generator is mocked in tests and stubbed by default at runtime (`src/modules/rag/gemini-stub.ts`, returns "message from gemini"); configurable latency / 503 share for the exercises comes with the consumer (P5.4)._
+_Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/learning/current-phase.md` → "Plan and decisions". No live Gemini: the review generator is mocked in tests and stubbed by default at runtime (`src/modules/rag/gemini-stub.ts`, returns "message from gemini"); configurable latency / 503 share for the exercises comes with the consumer (P5.4)._
 
 ## Status
 
