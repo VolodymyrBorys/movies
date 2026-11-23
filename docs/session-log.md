@@ -3,68 +3,54 @@
 Last session only; rewritten on each save. Previous checkpoints: `docs/sessions/archive/` (history, not read at session start).
 "owner" = verified by the repository owner outside the assistant sandbox. Plan: `docs/learning-roadmap.md`, active phase: `docs/learning/current-phase.md`; per-topic details: `docs/progress/`.
 
-## 2026-11-23 (session 2) · P5.1 schema, P5.2 async review API, Gemini stubs
+## 2026-11-23 (session 3) · P5.3 outbox relay
 
-Branch `p5-rabbitmq`: `dd57434` (P5.1), `4cf17fb` (P5.2), `57d7b59` (stubs), owner's
-`b35a557` (`src/modules/reviews/review-flow.txt`). Pushed by the owner; not merged.
+Branch `p5-rabbitmq`: `00f90a8` (P5.3) + this docs save. Local branch is 3+ commits ahead of
+`origin/p5-rabbitmq` (`8360c91`, `b3002c9`, `00f90a8`): owner pushes. Not merged.
 
 ### Completed
-- Prometheus target `rabbitmq` UP: `rabbitmq_prometheus` was disabled (Homebrew default;
-  management on :15672 is a separate plugin). Owner enabled it.
-- **P5.1:** `migrations/1795432527618_review_jobs_message_outbox.sql`, SQL approved by the owner
-  before writing. `review_jobs` (status CHECK, lease ⇔ running, result ⇔ succeeded,
-  finished_at ⇔ terminal, partial unique `(movie_id, movie_version)` for queued/running/succeeded,
-  FK `ON DELETE CASCADE` + `movie_id` index) and `message_outbox` (claim/lease/retry columns like
-  `cache_invalidation_outbox` + `message_id`, `routing_key`, `payload jsonb`). The integration
-  `TRUNCATE` now includes both tables (otherwise the FK breaks it).
-- **P5.2:** `POST /v1/movies/:id/review` → one transaction: SELECT version → `INSERT ... ON
-  CONFLICT DO NOTHING` → outbox row, or the existing job (at most 2 rounds). 202 + `Location`
-  for new/active jobs, 200 for succeeded, 404 also on FK `23503`. `GET /v1/review-jobs/:id`
-  (primary, camelCase, no `last_error`/lease). Sync controller deleted. Date helper
-  `src/utils/sql-dates.ts` shared with movies (format unchanged).
-- **Gemini stubs** (owner request): answer, review and `embedQuery` run real code up to the SDK
-  call and return a static result ("message from gemini" / model "stub" / constant unit
-  vector). `embedDocument` throws. On by default; `{ geminiStub: false }` in code for real calls.
+- **P5.3** (plan approved by the owner first): worker process `src/worker.ts` (`npm run worker`),
+  `PublishChannel` (confirm channel holder), topology (`movies.events`), relay + runner, unit and
+  integration tests. Details, failure modes, verification: `docs/progress/messaging.md` → P5.3.
+- `backend-reviewer` review → 4 fixes (startup-signal hang, stale reopen timer, `blocked` burning
+  attempts, reschedule logging on 0 rows) + 1 documented limitation (late `basic.return`).
+- `CLAUDE.md` "Current state": worker process / relay sentence added (owner approved).
 
-### Decisions
-- Owner: all 7 P5.1 schema decisions as proposed (cascade, text + CHECK, lease in the job,
-  DB attempts authoritative, `routing_key`, `message_id`, relay order `(available_at, id)`);
-  P5.2: 200 for succeeded, shared date helper, delete the sync controller.
-- Stub as a constructor option, not a bare early `return` (keeps the real path testable) and
-  not an env flag (no config value can turn on billing). `embedDocument` refuses so stub
-  vectors never reach the real Qdrant collection.
-- Result delivery: polling the job (`Location`). Webhook / SSE compared and deferred.
+### Decisions (owner, 2026-11-23)
+- Exchange `movies.events` (topic, durable), one for all domain events.
+- Unroutable messages: `mandatory` + `basic.return` → retry (not an alternate exchange).
+- Relay metrics deferred to P5.5 (worker needs its own `/metrics` port); logs carry `result` until then.
+- New npm script `worker`.
 
 ### Verification
-- Assistant: `npx tsc -p .` 0; unit tests 293/293 (`src/config src/infrastructure src/modules
-  src/workers src/utils`). Mutation checks (caught, restored): stub default off in review (2 failed),
-  answer (1 failed), embeddings (3 failed).
-- Owner: `npm run test:integration` 36/36 with the new migration on `movies_test`;
-  `migrate:up --dry-run` + `migrate:up` on the app DB; after P5.2 `src/routes` and
-  integration tests green (counts not reported; expected 49 integration).
-- Not done: up → down → up of P5.1 on a disposable DB; mutation check of `ON CONFLICT` /
-  dedupe (needs the owner's integration run); job ↔ outbox atomicity on a failed outbox
-  insert; any live run of the stubs.
+- Assistant: `npx tsc -p .` 0; unit 322/322 (`src/config src/infrastructure src/modules src/workers
+  src/utils src/messaging`); 7 mutation checks, all caught (list in `messaging.md`).
+- Owner: `npm run test:integration` green incl. `outbox-relay.int.test.ts` (counts not reported);
+  `npm run worker` against the local broker → channel open, started; Ctrl+C → shutdown ~0.6 s.
+- Not done: live publish path (no queue → `returned` + retry; temporary queue → `published`);
+  Ctrl+C during startup with the broker stopped; reconnect mid-batch against a real broker;
+  `src/worker.ts` startup/shutdown has no automated test.
 
 ### Known issues
-- Jobs stay `queued` until P5.3/P5.4 exist; no signal for that yet (P5.5).
-- RAG scripts that ingest (`embedDocument`) now fail by design; `scripts/test-embed.ts`,
-  `test-gemini-generation.ts` return the stub.
-- `git push` is blocked in the sandbox (no GitHub credentials) → owner pushes.
-- Stale `[branch "p2-k6-baseline"]` in `.git/config`; `RABBITMQ_URL=` in `.env.example`
-  unconfirmed; remote `p2-k6-baseline` / `p7-prompt-delimiters` deletion unconfirmed.
+- Until P5.4 binds a queue, every `review.requested` is returned and dead-letters after 20 attempts
+  (~51 min) → after P5.4, re-queue those rows (reset `dead_lettered_at`, `attempts`, `available_at`).
+- Worker logs: `service` is `movies-api` (shared root logger) and nested `child()` writes `component`
+  twice. Fix with a worker logger in P5.5.
+- `retryDelayMs` (relay and cache-invalidation worker): exponent cap 8 → effective max 256 s; the
+  5 min cap is dead code. Not changed.
+- Still open from earlier: Gemini-dependent RAG ingest scripts fail by design (`embedDocument` stub);
+  `git push` blocked in the sandbox; stale `[branch "p2-k6-baseline"]` in `.git/config`;
+  `RABBITMQ_URL=` in `.env.example` unconfirmed; remote `p2-k6-baseline` / `p7-prompt-delimiters`
+  deletion unconfirmed; P5.1 up → down → up on a disposable DB not reported; mutation check of
+  review `ON CONFLICT` dedupe not done.
+- Low priority (2026-11-22): under `npm run dev` (`--watch`) a process with `shuttingDown=true` kept
+  serving; possible `shutdown()` bug. Check: Ctrl+C under k6 load (no `--watch`) → exit ≤ 15 s.
 
 ### Next steps
-1. P5.3 plan (no code until approved): worker process entry point (separate from `server.ts`),
-   relay claim on `message_outbox` (SKIP LOCKED + lease, order `(available_at, id)`),
-   ConfirmChannel, mark published only after confirm, retry/backoff/dead-letter, exchange
-   declaration (topic exchange name), `message_id` as AMQP messageId, metrics hooks for P5.5.
-2. Then P5.4 consumer + topology (quorum queue, TTL retry queues, DLX/DLQ, superseded check).
-
-### Carried over from earlier sessions (still open)
-- Low priority (2026-11-22): under `npm run dev` (`--watch`) a process with `shuttingDown=true` kept serving
-  with working PG; possible `shutdown()` bug. Check: Ctrl+C under k6 load (no `--watch`) → exit ≤ 15 s.
-
-### After this entry (2026-11-23, uncommitted, pending owner review)
-- Docs restructured for smaller session-start context: roadmap → index + `docs/learning/*`; this file →
-  checkpoint; full history in `docs/sessions/archive/2026-11.md`; `resume.md` / `save.md` (root) adapted.
+1. Owner: push; optionally run the P5.3 live publish check (`messaging.md` → P5.3 → Verification).
+2. P5.4 plan (no code until approved): consumer in the worker process, quorum queue
+   `reviews.generate` bound to `movies.events` / `review.requested`, prefetch, manual ack, TTL retry
+   queues with attempt tracking (DB `attempts` authoritative), DLX → DLQ, `superseded` on version
+   change, ack when the job no longer exists, fake generator (`REVIEW_GENERATOR=fake`), consumer
+   setup inside `PublishChannel`-style recovery `setup`.
+3. After P5.4: re-queue the dead-lettered `review.requested` rows from the P5.3 period.
