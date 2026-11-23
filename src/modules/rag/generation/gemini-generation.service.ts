@@ -1,5 +1,10 @@
 import { neutralizeDelimiters } from "../prompt-safety.ts";
 import { RagInputError } from "../rag.errors.ts";
+import {
+  GEMINI_STUB_MODEL,
+  GEMINI_STUB_TEXT,
+  type GeminiStubOptions,
+} from "../gemini-stub.ts";
 import { generateWithRetries } from "./gemini-generate.ts";
 import type {
   GenerateAnswerInput,
@@ -26,6 +31,13 @@ Rules:
 // RAG answer generation: prompt + parameters only. Retries, timeouts, cancellation and
 // metrics (operation "answer") live in gemini-generate.ts.
 export class GeminiGenerationService {
+  private readonly geminiStub: boolean;
+
+  /** LAB: Gemini stub on by default (gemini-stub.ts). */
+  constructor(options: GeminiStubOptions = {}) {
+    this.geminiStub = options.geminiStub ?? true;
+  }
+
   async generate(input: GenerateAnswerInput): Promise<GenerateAnswerResult> {
     const question = input.question.trim();
     const context = input.context.trim();
@@ -54,6 +66,13 @@ ${neutralizeDelimiters(question)}
 </question>
 `;
 
+    if (this.geminiStub) {
+      // Same cancellation contract as the real call: an aborted caller gets no result.
+      input.signal?.throwIfAborted();
+      return { answer: GEMINI_STUB_TEXT, model: GEMINI_STUB_MODEL };
+    }
+
+    // Real implementation below: Gemini generateContent with the shared retry loop.
     const { text, model } = await generateWithRetries({
       operation: "answer",
       prompt,

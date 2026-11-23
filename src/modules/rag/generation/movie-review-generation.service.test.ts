@@ -19,9 +19,10 @@ vi.mock("../../../infrastructure/logger.ts", async () => {
   return { logger: pino({ level: "silent" }) };
 });
 
-const { MovieReviewGenerationService } = await import(
+const { MovieReviewGenerationService, movieReviewGenerationService } = await import(
   "./movie-review-generation.service.ts"
 );
+const { GEMINI_STUB_TEXT, GEMINI_STUB_MODEL } = await import("../gemini-stub.ts");
 const { RagInputError } = await import("../rag.errors.ts");
 const { ragGenerationAttemptsTotal, ragTokensTotal } = await import(
   "../../../infrastructure/metrics.ts"
@@ -55,7 +56,8 @@ function apiError(status: number): Error {
 }
 
 describe("MovieReviewGenerationService", () => {
-  const service = new MovieReviewGenerationService();
+  // The real Gemini path (client mocked); the stub has its own describe below.
+  const service = new MovieReviewGenerationService({ geminiStub: false });
 
   beforeEach(() => {
     generateContent.mockReset();
@@ -173,5 +175,38 @@ describe("MovieReviewGenerationService", () => {
     expect(await metricValue(ragTokensTotal, { operation: "answer", type: "output" })).toBe(
       before.answerOutput,
     );
+  });
+});
+
+describe("MovieReviewGenerationService Gemini stub (default)", () => {
+  beforeEach(() => {
+    generateContent.mockReset();
+  });
+
+  it.each([
+    ["the exported instance", movieReviewGenerationService],
+    ["a service built without options", new MovieReviewGenerationService()],
+  ])("%s returns the stub and never calls Gemini", async (_name, service) => {
+    await expect(service.generate(movie)).resolves.toEqual({
+      review: GEMINI_STUB_TEXT,
+      model: GEMINI_STUB_MODEL,
+    });
+    expect(generateContent).not.toHaveBeenCalled();
+  });
+
+  it("still validates the input before the stub", async () => {
+    await expect(
+      new MovieReviewGenerationService().generate({ ...movie, title: "  " }),
+    ).rejects.toBeInstanceOf(RagInputError);
+  });
+
+  it("rejects an already aborted caller like the real call", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("deadline"));
+
+    await expect(
+      new MovieReviewGenerationService().generate({ ...movie, signal: controller.signal }),
+    ).rejects.toThrow("deadline");
+    expect(generateContent).not.toHaveBeenCalled();
   });
 });

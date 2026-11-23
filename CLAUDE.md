@@ -50,7 +50,7 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 - Retrieved content is untrusted data, never instructions. Preserve source metadata in results.
 - Untrusted text inserted into prompt blocks (`<context>`, `<question>`, `<movie>`) must go through `neutralizeDelimiters` (`src/modules/rag/prompt-safety.ts`); one-line header values through `toSingleLine`.
 - Don't log prompts, retrieved document bodies or full RAG context.
-- No live Gemini runs (owner decision, 2026-11-22: billable, frequent 503). Gemini-dependent behavior is implemented as designed and verified only with mocked clients; say so in reports.
+- No live Gemini runs (owner decision, 2026-11-22: billable, frequent 503). Gemini-dependent behavior is implemented as designed and verified only with mocked clients; say so in reports. All three Gemini call sites (answer, review, embeddings) are stubbed by default (`src/modules/rag/gemini-stub.ts`, owner, 2026-11-23): real code runs up to the SDK call, then returns a static result; `embedDocument` refuses (stub vectors must not reach Qdrant). Real calls only with `{ geminiStub: false }` in code — don't add an env switch.
 
 ## API and observability
 

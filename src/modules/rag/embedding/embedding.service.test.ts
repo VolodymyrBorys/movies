@@ -29,7 +29,8 @@ function lastConfig(): Record<string, unknown> {
 }
 
 describe("EmbeddingService", () => {
-  const service = new EmbeddingService();
+  // The real Gemini path (client mocked); the stub has its own describe below.
+  const service = new EmbeddingService({ geminiStub: false });
   const vector = Array.from({ length: DIMENSIONS }, () => 0.1);
 
   beforeEach(() => {
@@ -142,5 +143,41 @@ describe("EmbeddingService", () => {
     embedContent.mockRejectedValue(error);
 
     await expect(service.embedQuery("question")).rejects.toBe(error);
+  });
+});
+
+describe("EmbeddingService Gemini stub (default)", () => {
+  beforeEach(() => {
+    embedContent.mockReset();
+  });
+
+  it("embeds a query as a constant unit vector without calling Gemini", async () => {
+    const vector = await new EmbeddingService().embedQuery("question");
+
+    expect(vector).toHaveLength(DIMENSIONS);
+    expect(Math.hypot(...vector)).toBeCloseTo(1, 10);
+    expect(embedContent).not.toHaveBeenCalled();
+  });
+
+  it("refuses to embed documents (stub vectors must not reach Qdrant)", async () => {
+    await expect(new EmbeddingService().embedDocument("document text")).rejects.toThrow(
+      /refusing to embed documents/,
+    );
+    expect(embedContent).not.toHaveBeenCalled();
+  });
+
+  it("still validates the input before the stub", async () => {
+    await expect(new EmbeddingService().embedQuery("   ")).rejects.toBeInstanceOf(
+      RagInputError,
+    );
+  });
+
+  it("rejects an already aborted caller like the real call", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("deadline"));
+
+    await expect(
+      new EmbeddingService().embedQuery("question", controller.signal),
+    ).rejects.toThrow("deadline");
   });
 });

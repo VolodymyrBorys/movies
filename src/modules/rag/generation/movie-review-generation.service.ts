@@ -1,5 +1,10 @@
 import { neutralizeDelimiters, toSingleLine } from "../prompt-safety.ts";
 import { RagInputError } from "../rag.errors.ts";
+import {
+  GEMINI_STUB_MODEL,
+  GEMINI_STUB_TEXT,
+  type GeminiStubOptions,
+} from "../gemini-stub.ts";
 import { generateWithRetries } from "./gemini-generate.ts";
 
 // Movie review generation (synchronous, D4). Lives in rag/generation/ because CLAUDE.md
@@ -7,8 +12,7 @@ import { generateWithRetries } from "./gemini-generate.ts";
 // Parameters chosen by the owner (2026-11-22): same model as answers, temperature 0.7
 // (some variety for prose), 1024 output tokens (a review is short).
 //
-// LAB: simplified — the review is not persisted and every call is billed; the async
-// version (P5) adds a job, idempotent regeneration and storage.
+// Called by the review worker (P5.4); the API only creates jobs (P5.2).
 
 const TEMPERATURE = 0.7;
 const MAX_OUTPUT_TOKENS = 1_024;
@@ -59,14 +63,30 @@ Description: ${description}
 }
 
 export class MovieReviewGenerationService {
+  private readonly geminiStub: boolean;
+
+  /** LAB: Gemini stub on by default (gemini-stub.ts). */
+  constructor(options: GeminiStubOptions = {}) {
+    this.geminiStub = options.geminiStub ?? true;
+  }
+
   async generate(input: MovieReviewInput): Promise<MovieReviewResult> {
     if (!input.title.trim()) {
       throw new RagInputError("Movie title cannot be empty");
     }
 
+    const prompt = buildPrompt(input);
+
+    if (this.geminiStub) {
+      // Same cancellation contract as the real call: an aborted caller gets no result.
+      input.signal?.throwIfAborted();
+      return { review: GEMINI_STUB_TEXT, model: GEMINI_STUB_MODEL };
+    }
+
+    // Real implementation below: Gemini generateContent with the shared retry loop.
     const { text, model } = await generateWithRetries({
       operation: "review",
-      prompt: buildPrompt(input),
+      prompt,
       systemInstruction: SYSTEM_INSTRUCTION,
       temperature: TEMPERATURE,
       maxOutputTokens: MAX_OUTPUT_TOKENS,

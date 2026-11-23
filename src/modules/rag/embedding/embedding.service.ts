@@ -6,11 +6,19 @@ import {
   toUpstreamError,
 } from "../rag.errors.ts";
 import { timeStage } from "../rag-metrics.ts";
+import { geminiStubEmbedding, type GeminiStubOptions } from "../gemini-stub.ts";
 
 const MODEL = "gemini-embedding-001";
 const DIMENSIONS = 768;
 
 export class EmbeddingService {
+  private readonly geminiStub: boolean;
+
+  /** LAB: Gemini stub on by default (gemini-stub.ts). */
+  constructor(options: GeminiStubOptions = {}) {
+    this.geminiStub = options.geminiStub ?? true;
+  }
+
   async embedDocument(text: string, signal?: AbortSignal): Promise<number[]> {
     return this.embed(text, "RETRIEVAL_DOCUMENT", signal);
   }
@@ -38,6 +46,19 @@ export class EmbeddingService {
     taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY",
     signal?: AbortSignal,
   ): Promise<number[]> {
+    if (this.geminiStub) {
+      // Document vectors are upserted into Qdrant: a stub vector there would silently
+      // corrupt the collection for later real runs, so ingestion refuses instead.
+      if (taskType === "RETRIEVAL_DOCUMENT") {
+        throw new Error(
+          "Gemini stub is on: refusing to embed documents (stub vectors would be written to Qdrant)",
+        );
+      }
+      signal?.throwIfAborted();
+      return geminiStubEmbedding(DIMENSIONS);
+    }
+
+    // Real implementation below: Gemini embedContent.
     // Client-side cancellation only: Gemini may still bill a request already sent.
     let response: EmbedContentResponse;
     try {
