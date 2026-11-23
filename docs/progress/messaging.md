@@ -9,7 +9,7 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | P5.0 broker + config + connection | done: unit-tested; live `scripts/rabbitmq-ping.ts` OK (owner, 2026-11-23); Prometheus target `rabbitmq` UP after `rabbitmq-plugins enable rabbitmq_prometheus` (owner, 2026-11-23; the plugin is off by default in Homebrew, management on :15672 is a different plugin) |
 | P5.1 schema (`review_jobs`, `message_outbox`) | done: migration `1795432527618_review_jobs_message_outbox.sql`; integration 36/36 and `migrate:up` on the app DB (owner, 2026-11-23); up → down → up on a disposable DB not reported |
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
-| P5.3 outbox relay (publisher confirms) | not started |
+| P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) not yet run |
 | P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | not started |
 | P5.5 metrics, alerts, dashboard | not started |
 | P5.6 graceful shutdown | not started |
@@ -59,6 +59,57 @@ Dependency: `amqplib@^2.4.1` (owner, 2026-11-23; ships its own TypeScript types 
 Decisions (owner, 2026-11-23): `text` + CHECK instead of ENUM (like `movies_status_valid`); attempts in the DB are authoritative (AMQP headers are lost on republish); no sweeper for expired leases (redelivery after a consumer crash finds `running` with an expired lease and takes it over). `src/test/integration-db.ts` truncates the new tables (the FK would otherwise make `TRUNCATE movies` fail).
 
 Finding (hypothesis, check in P3 with `EXPLAIN`): the existing cache-invalidation worker claims with `ORDER BY id` over the `(available_at, id)` index → likely a Sort on a large backlog.
+
+## P5.3 — outbox relay
+
+| File | Role |
+|---|---|
+| `src/worker.ts` | Worker process (`npm run worker`): PG → recovering connection (`setup` = open publish channel) → relay loop. Exits 1 without `RABBITMQ_URL` or when the broker is unreachable at start (~15 s). Signal during startup → close PG, exit immediately (nothing in flight; a pending connect would otherwise keep the process alive). LAB shutdown: relay finishes its batch, then channel, connection, PG close (consumer draining: P5.6). |
+| `src/messaging/topology.ts` | `EVENTS_EXCHANGE = "movies.events"` (topic, durable). Queues/bindings: P5.4. |
+| `src/messaging/publish-channel.ts` | Holds the `ConfirmChannel`. Connection lost → recovery calls `open(newModel)`. Channel-only close (e.g. 404 on a deleted exchange) → reopen on the same connection every 5 s while it is alive (a reopen timer left by the old connection is cleared on `open(newModel)` — amqplib closes channels before the connection's `close`). No channel or connection `blocked` → `current()` is null, relay claims nothing. |
+| `src/workers/outbox-relay.ts` | Claim (`SKIP LOCKED`, lease 30 s, `ORDER BY available_at, id`, batch 50) → publish (persistent, `mandatory`, `messageId = message_id`, `type = routing_key`) → confirms with a 10 s batch deadline → `published_at` for acked rows; retry/backoff (1 s doubling, effective cap 256 s: exponent capped at 8, + up to 1 s jitter) or dead-letter after 20 attempts otherwise. |
+| `src/workers/outbox-relay-runner.ts` | Poll loop (1 s when idle), channel read per batch. |
+
+### Decisions (owner, 2026-11-23)
+
+- Exchange `movies.events`; one topic exchange for all domain events (future `movie.updated` etc.).
+- **`mandatory` + `basic.return` → retry.** Without `mandatory` the broker acks an unroutable message and drops it — the relay would mark it published and the message is gone. RabbitMQ sends `basic.return` before `basic.ack` on the same channel (amqplib processes frames in order), so the confirm callback knows. Consequence until P5.4 binds a queue: every `review.requested` cycles through retries and dead-letters after 20 attempts (1 + 2 + … + 256 s, then 256 s each ≈ 51 min). Alternative rejected for now: alternate exchange → `unroutable` queue.
+- Metrics deferred to P5.5 (the worker needs its own `/metrics` port). Until then the batch log line has counts per publish result (`published | returned | publish_failed | timeout`); each failed message logs `publishResult` and the action `result` (`retry_scheduled | dead_lettered | lease_lost`); dead-letters log at `error`. `lease_lost` = the reschedule UPDATE matched no row, so no outcome is claimed.
+- Confirm deadline (10 s) < lease (30 s): waiting past the lease would let another relay claim the row while ours is still in flight.
+
+### Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| Broker down | No channel → nothing claimed, attempts not burned; rows wait in the outbox |
+| Connection drops mid-batch | Unconfirmed publishes fail with `channel closed` → retry; some of them may have reached the broker → duplicates with the same `messageId` |
+| Confirm after the deadline | Row retried although the broker has it → duplicate |
+| Crash / PG down between confirm and `UPDATE` | Row republished after the lease (30 s) → duplicate |
+| Lease lost while waiting (shouldn't happen: deadline < lease) | `UPDATE ... AND locked_by = $me` marks / reschedules nothing; `lease_lost` warning; the new owner republishes |
+| Write buffer full (`publish()` → false) | Waits for `drain` (bounded by the deadline); rest of the batch → `timeout` |
+| Broker alarm (`blocked`) | Relay stops claiming until `unblocked` (attempts not burned). A batch already in flight when the alarm starts times out → retry; its buffered frames are flushed after the alarm → duplicates |
+| Late `basic.return` of an earlier (timed-out) publish of the same row during its retry batch | Retry classified `returned` even if routed (returns are matched by the stable `messageId`) → extra retry + duplicate, never a lost message |
+
+All duplicates carry the same AMQP `messageId`; the consumer (P5.4) must be idempotent (job status check).
+LAB: no ordering guarantee across retries / parallel relays (fine for one message per job).
+
+### Verification
+
+- Assistant (2026-11-23): `npx tsc -p .` 0; unit 322/322 (`src/config src/infrastructure src/modules src/workers src/utils src/messaging`; new: `outbox-relay.test.ts` 17, `publish-channel.test.ts` 12). Mutation checks, all caught and restored: ignore `basic.return` (2 failed), `mandatory: false` (1), no wait for `drain` (2), no reopen-timer clear in `open()` (1), ignore `blocked` (1), no `closing` check in `open()` (1), no `rowCount` check in reschedule (2).
+- Review (`backend-reviewer`, 2026-11-23): fixed — signal during startup left the worker hanging with the relay on a closed pool; stale reopen timer from the old connection blocked the reopen on the new one; `blocked` burned attempts; reschedule logged outcomes on 0 rows. Documented — late `basic.return` (table above). Not covered by tests: `src/worker.ts` startup/shutdown (top-level script; check manually: Ctrl+C while the broker is stopped → exits within ~1 s).
+- Owner (2026-11-23, passed; counts not reported): `npm run test:integration` incl. `src/workers/outbox-relay.int.test.ts` (7: mark after ack, unroutable → backoff, dead-letter, two concurrent relays → no message published twice, active/expired lease + `available_at`, order, lease lost → not marked). The concurrency test proves no duplicates, not SKIP LOCKED specifically: plain `FOR UPDATE` would also pass (the lease condition is re-checked after the lock wait).
+- Live check (owner): worker start → "Publish channel open", "Worker started"; Ctrl+C → shutdown in ~0.6 s, PG pools closed (2026-11-23). Publish path and Ctrl+C during startup (broker stopped) still pending:
+  ```
+  npm run worker                                # "Publish channel open", "Worker started"
+  curl -si -X POST localhost:3000/v1/movies/<id>/review   # 202
+  # worker log: "Outbox message not published; retry scheduled", result=returned (no queue yet)
+  # temporary queue to see a successful publish (delete afterwards):
+  rabbitmqadmin declare queue name=tmp-review durable=false
+  rabbitmqadmin declare binding source=movies.events destination=tmp-review routing_key='review.#'
+  # next retry → "Outbox relay batch done" published=1; message visible in tmp-review
+  rabbitmqadmin delete queue name=tmp-review
+  ```
+- Not verified: live broker (confirms, returns, reconnect mid-batch); the kill-the-broker exercise is P5.7.
 
 ## Setup (owner, Homebrew)
 
