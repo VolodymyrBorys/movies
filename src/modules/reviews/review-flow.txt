@@ -1,0 +1,18 @@
+Клієнт            API                       PostgreSQL                Worker (P5.3/P5.4)       RabbitMQ
+  │ POST /movies/:id/review                    │                          │                      │
+  │──────────────▶│ BEGIN                      │                          │                      │
+  │               │ SELECT version ───────────▶│                          │                      │
+  │               │ INSERT review_jobs ───────▶│ (queued)                 │                      │
+  │               │ INSERT message_outbox ────▶│ (review.requested)       │                      │
+  │               │ COMMIT                     │                          │                      │
+  │◀── 202 + Location: /v1/review-jobs/J ──────│                          │                      │
+  │                                            │◀── relay: claim outbox ──│                      │
+  │                                            │                          │── publish + confirm ▶│
+  │                                            │◀── mark published ───────│                      │
+  │                                            │                          │◀──── consume ────────│
+  │                                            │◀── job: running ─────────│                      │
+  │                                            │                          │  generate (stub)     │
+  │                                            │◀── job: succeeded+review─│── ack ──────────────▶│
+  │ GET /v1/review-jobs/J (polling)            │                          │                      │
+  │──────────────▶│ SELECT ───────────────────▶│                          │                      │
+  │◀── 200 {status:"succeeded", review} ───────│                          │                      │
