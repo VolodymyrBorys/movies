@@ -1,7 +1,7 @@
 # Performance baseline (P2)
 
 _Started: 2026-11-22 · Branch `p2-k6-baseline` · Scope of this step: P2.0 smoke, P2.1 cached reads, P2.2 cold reads._
-_Status: **P2.0 smoke passed** (2026-11-22); P2.1/P2.2 not run yet (k6 is run by the owner; the assistant sandbox can't reach local ports)._
+_Status: **P2.0 smoke passed** (2026-11-22); P2.1 cached 100–1600 req/s done, k6 side only (2026-11-23); 3200+, P2.2 and P2.3+ deferred by the owner in favour of P5 (k6 is run by the owner; the assistant sandbox can't reach local ports)._
 
 ## What these numbers are (and are not)
 
@@ -84,7 +84,13 @@ _Machine:_ … · _k6:_ v2.4.0 · _Node:_ v26.13.1 (assistant's shell; confirm) 
 
 | Rate (req/s) | Achieved | p50 ms | p95 ms | p99 ms | Failed % | Dropped | Cache hit % | API CPU | EL lag p99 | Pool waiting |
 |---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | |
+| 100 | 99.98 | 1.33 | 2.11 | 4.00 | 0 | 0 | — | — | — | — |
+| 200 | 199.95 | 1.12 | 1.71 | 2.73 | 0 | 0 | — | — | — | — |
+| 400 | 399.93 | 0.94 | 1.49 | 2.50 | 0 | 0 | — | — | — | — |
+| 800 | 799.83 | 0.52 | 0.94 | 1.78 | 0 | 0 | — | — | — | — |
+| 1600 | 1599.78 | 0.31 | 0.47 | 1.59 | 0 | 0 | — | — | — | — |
+
+Owner, 2026-11-23 (runs `runs/2026-11-23T*-read-cached*.json`; r100 has no `RUN_LABEL`). k6 side only: server-side columns were not collected (`—`). Cache: `cache_requests_total{cache="movies_list",result="miss"}` = 92 at the end — a cumulative counter since API start (includes smoke/warm-up), so not attributable per run; vs ~372k stair requests the hit ratio was ≈ 99.98% (approximate). No knee up to 1600 req/s; max latency grew 36 → 80 ms while p99 stayed < 3 ms.
 
 ### P2.2 cold
 
@@ -94,7 +100,9 @@ _Machine:_ … · _k6:_ v2.4.0 · _Node:_ v26.13.1 (assistant's shell; confirm) 
 
 ### Findings
 
-_(knee per scenario, first saturated resource with evidence, cached vs cold cost, surprises)_
+- Cached path: no knee up to 1600 req/s (all thresholds green, `vus_max` ≤ 160). Higher rates (3200+), P2.2 cold and P2.3–P2.8 **deferred by the owner (2026-11-23)** in favour of P5.
+- Surprise: latency **falls** as the rate rises (p50 1.33 → 0.31 ms). Hypotheses, not verified: macOS CPU power management (idle cores clock down / wake-up cost at low rates) and the Node event loop sleeping between sparse requests. Consequence: compare only runs at the same rate on this laptop.
+- `max` grows with rate (36 → 80 ms) while p99 is flat. Hypotheses: GC pauses, or the ~60 s TTL expiry of the single cache key (concurrent misses). Check: `cache_requests_total{result="miss"}` steps over the run window.
 
 ## Next (not in this step)
 

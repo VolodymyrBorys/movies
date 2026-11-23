@@ -5,6 +5,40 @@ sandbox. Plans live in `docs/learning-roadmap.md`; per-topic details in `docs/pr
 
 ---
 
+## 2026-11-23 · B (P2): cached stairs; P5 planned
+
+Branch `p2-k6-baseline` (not merged).
+
+### Completed
+- P2.1 cached stairs 100/200/400/800/1600 req/s (owner): all thresholds green, 0% failed,
+  dropped 0, p99 ≤ 4 ms, no knee. Table + findings in `docs/perf/baseline.md`; summaries
+  `docs/perf/runs/2026-11-23T*-read-cached*.json` (committed). Server-side columns not collected;
+  only `cache_requests_total{result="miss"}` = 92 cumulative (not attributable per run).
+- Surprise (hypotheses, unverified): latency falls as rate rises (p50 1.33 → 0.31 ms) — macOS
+  power management / event-loop wake-ups; `max` grows 36 → 80 ms (GC or TTL expiry).
+- P5 plan agreed — recorded in `docs/learning-roadmap.md` Phase 5 "Plan and decisions".
+
+### Decisions (owner)
+- Defer cached 3200+, P2.2 cold, P2.3–P2.8; move to P5.
+- P5: `amqplib` directly; no live Gemini (business logic, mocked generator); replace the
+  synchronous review with `202` + job; new `message_outbox`; dev fake generator; relay in the
+  worker process; RabbitMQ local via Homebrew, optionally a 2–3 node cluster.
+- Owner installed `amqplib@2.4.1` (bundled types) and `@types/amqplib@0.10.8` (0.10 API —
+  assistant recommends `npm uninstall @types/amqplib`).
+
+### Not verified / open
+- `@types/amqplib` vs bundled types: TS resolves the bundled `index.d.ts` via `exports` (checked
+  in `node_modules/amqplib/package.json`); not compiled against yet.
+- `shutdown()` under `--watch` question from 2026-11-22 still open.
+- Untracked, not committed: failed smoke `docs/perf/runs/2026-11-22T17-57-50-908Z-smoke.json`.
+
+### Next steps
+1. Owner: merge `p2-k6-baseline` into `master`, create `p5-rabbitmq`; decide on `@types/amqplib`.
+2. P5.0: RabbitMQ via brew (single node first; cluster later for quorum exercises), Prometheus
+   scrape of :15692, optional `RABBITMQ_URL` config, connection module with reconnect.
+
+---
+
 ## 2026-11-22 (session 2, cont.) · B (P2): k6 scenarios P2.0–P2.2
 
 Branch `p2-k6-baseline` (from `master` at `63eb93c`; D5 + D6 merged and pushed by the owner,
