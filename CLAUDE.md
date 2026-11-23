@@ -4,7 +4,7 @@ General engineering, security and workflow rules live in `~/.claude/CLAUDE.md`; 
 
 ## Current state (verified 2026-11-19, integration tests run)
 
-- `app.ts` mounts `movies`, `rag` and `metrics` routers under `/v1`, probes (`/healthz`, `/readyz`) at the root. RAG endpoints: `POST /v1/knowledge-base/search`, `POST /v1/rag/answer`, `POST /v1/movies/:id/review` (sync Gemini review, not persisted); 503 `RAG_NOT_CONFIGURED` without RAG config.
+- `app.ts` mounts `movies`, `rag`, `review-jobs` and `metrics` routers under `/v1`, probes (`/healthz`, `/readyz`) at the root. RAG endpoints: `POST /v1/knowledge-base/search`, `POST /v1/rag/answer`; 503 `RAG_NOT_CONFIGURED` without RAG config. Reviews (P5.2): `POST /v1/movies/:id/review` (async: 202 + `review_jobs` row + `review.requested` in `message_outbox`, same transaction; 200 if already succeeded for this version; the API never calls Gemini), `GET /v1/review-jobs/:id` (primary).
 - Movies API: `GET /v1/movies` (keyset list, cached), `POST /v1/movies`, `GET/PATCH/DELETE /v1/movies/:id`. PATCH supports `If-Match` (strong ETag = version, 412 on mismatch, optional). GET by id reads the primary.
 - Installed but inactive: OpenTelemetry (never initialized), Piscina (`cpuPool` commented out in `server.ts`).
 - Vitest (`vitest.config.ts`, `src/**/*.test.ts`, excludes `*.int.test.ts`): unit tests cover RAG, movies cursor/service, config, readiness, metrics, outbox worker metrics. HTTP route tests `src/routes/*.test.ts` (supertest; PG/Redis/logger replaced with `vi.mock`; need local port binding — blocked in the sandbox, so the owner runs them). Gemini/Qdrant clients are replaced with `vi.mock`, so tests make no network calls. `scripts/test-*.ts` are manual scripts, not tests.

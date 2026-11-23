@@ -8,6 +8,7 @@ import { router as moviesRoutes } from "./routes/movies.ts";
 import { router as metricsRoutes } from "./routes/metrics.ts";
 import { router as healthRoutes } from "./routes/health.ts";
 import { router as ragRoutes } from "./routes/rag.ts";
+import { router as reviewJobsRoutes } from "./routes/review-jobs.ts";
 import helmet from "helmet";
 
 // Probes hit every few seconds per pod; access-logging them only adds noise.
@@ -50,6 +51,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use("/v1", metricsRoutes);
 app.use("/v1", moviesRoutes);
 app.use("/v1", ragRoutes);
+app.use("/v1", reviewJobsRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({

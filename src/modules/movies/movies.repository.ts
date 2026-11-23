@@ -5,6 +5,7 @@ import type {
   MovieSort,
 } from "../../models/movies.ts";
 import { PG } from "../../infrastructure/postgres.ts";
+import { utcTimestampSql } from "../../utils/sql-dates.ts";
 import { encodeMovieCursor, type MovieCursor } from "./cursor.ts";
 
 export interface MoviePage {
@@ -20,10 +21,8 @@ interface MovieListRow extends MovieRow {
   cursor_created_at: string;
 }
 
-// The single date format of this API: RFC 3339 UTC text with MICROsecond precision
-// ("2026-11-19T10:00:00.123456Z"), independent of session TimeZone/DateStyle.
-// Used for response fields and the cursor alike; a JS Date would drop the microseconds.
-const CREATED_AT_UTC_SQL = `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+// The API date format (see utcTimestampSql), used for response fields and the cursor alike.
+const CREATED_AT_UTC_SQL = utcTimestampSql("created_at");
 
 const MOVIE_DETAILS_COLUMNS = `id, title, description, release_year, duration_minutes, ${CREATED_AT_UTC_SQL} AS created_at, status, version`;
 
