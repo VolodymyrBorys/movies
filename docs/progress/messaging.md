@@ -7,7 +7,7 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | Step | State |
 |---|---|
 | P5.0 broker + config + connection | done: unit-tested; live `scripts/rabbitmq-ping.ts` OK (owner, 2026-11-23); Prometheus target not confirmed yet |
-| P5.1 schema (`review_jobs`, `message_outbox`) | not started |
+| P5.1 schema (`review_jobs`, `message_outbox`) | done: migration `1795432527618_review_jobs_message_outbox.sql`; integration 36/36 and `migrate:up` on the app DB (owner, 2026-11-23); up → down → up on a disposable DB not reported |
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | not started |
 | P5.3 outbox relay (publisher confirms) | not started |
 | P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | not started |
@@ -49,6 +49,16 @@ Dependency: `amqplib@^2.4.1` (owner, 2026-11-23; ships its own TypeScript types 
 - Fix after the owner's first ping run: `connectRabbitMq` defaulted to the root logger, which imports `env.ts` → a broker-only script failed with "PG_DATABASE … undefined". The logger is now a required option; the ping script brings its own. Checked: `env -i … node scripts/rabbitmq-ping.ts` without `PG_*` reaches the connect attempts (EPERM in the sandbox, retries logged).
 - Owner (2026-11-23): `node --env-file-if-exists=.env scripts/rabbitmq-ping.ts` against the local broker — OK.
 - Not verified: recovery behaviour against a real broker (stop/start during a run), the Prometheus target `rabbitmq` UP.
+
+## P5.1 — schema
+
+`review_jobs`: one row per review request. Statuses `queued → running → succeeded | failed | superseded` (transient error: `running → queued`). Invariants enforced by CHECKs: lease (`locked_by`/`locked_until`) exists iff `running`; `review` + `model` exist iff `succeeded`; `finished_at` iff terminal. Partial unique index on `(movie_id, movie_version)` for `queued/running/succeeded` → dedupe of concurrent POSTs via `ON CONFLICT ... DO NOTHING`; `failed`/`superseded` allow a new job. FK to `movies` with `ON DELETE CASCADE` (+ index on `movie_id`, otherwise every movie delete seq-scans the jobs); a consumer that finds no job acks.
+
+`message_outbox`: same claim/lease/retry/dead-letter columns as `cache_invalidation_outbox`, plus `message_id` (stable AMQP messageId across republishes), `routing_key` (exchange fixed in code), `payload jsonb` (object). Pending partial index `(available_at, id)`; the relay orders by the same columns.
+
+Decisions (owner, 2026-11-23): `text` + CHECK instead of ENUM (like `movies_status_valid`); attempts in the DB are authoritative (AMQP headers are lost on republish); no sweeper for expired leases (redelivery after a consumer crash finds `running` with an expired lease and takes it over). `src/test/integration-db.ts` truncates the new tables (the FK would otherwise make `TRUNCATE movies` fail).
+
+Finding (hypothesis, check in P3 with `EXPLAIN`): the existing cache-invalidation worker claims with `ORDER BY id` over the `(available_at, id)` index → likely a Sort on a large backlog.
 
 ## Setup (owner, Homebrew)
 
