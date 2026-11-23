@@ -27,6 +27,14 @@ scrape_configs:
     static_configs:
       - targets: ["redis-exporter:9121"]
 
+  # RabbitMQ on the host (Homebrew), built-in rabbitmq_prometheus plugin on :15692.
+  # /metrics returns totals aggregated over all queues (no `queue` label). Per-queue series
+  # (needed for "DLQ > 0") come from /metrics/detailed or /metrics/per-object — decided in
+  # P5.5 together with the alerts.
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["host.docker.internal:15692"]
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

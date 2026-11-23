@@ -32,10 +32,24 @@ Branch `p2-k6-baseline` (not merged).
 - `shutdown()` under `--watch` question from 2026-11-22 still open.
 - Untracked, not committed: failed smoke `docs/perf/runs/2026-11-22T17-57-50-908Z-smoke.json`.
 
+### Later the same day
+- Owner merged `p2-k6-baseline` into `master` (`92d7bb8`, checked with `git ls-remote`), created
+  `p5-rabbitmq`, removed `@types/amqplib`, set `RABBITMQ_URL=amqp://localhost:5672` in `.env`.
+- **P5.0 code done, uncommitted** (details, decisions, failure modes: `docs/progress/messaging.md`):
+  `src/config/rabbitmq.ts`, `src/infrastructure/rabbitmq.ts` (amqplib built-in recovery instead
+  of a hand-written loop), `scripts/rabbitmq-ping.ts`, Prometheus job `rabbitmq` (:15692).
+  Assistant: `npx tsc -p .` 0, unit tests 282/282 without `src/routes` (13 new), 4 mutations
+  caught, `promtool check config` SUCCESS. Not verified: live broker, recovery, Prometheus target.
+
+- Owner's first ping run failed on `PG_*`: `connectRabbitMq` defaulted to the root logger
+  (imports `env.ts`). Fixed: logger is a required option. Owner re-ran: ping OK. P5.0 committed.
+- Branches `p2-k6-baseline`, `p7-prompt-delimiters`: heads verified as ancestors of `master`
+  (`git merge-base --is-ancestor`) before deletion.
+
 ### Next steps
-1. Owner: merge `p2-k6-baseline` into `master`, create `p5-rabbitmq`; decide on `@types/amqplib`.
-2. P5.0: RabbitMQ via brew (single node first; cluster later for quorum exercises), Prometheus
-   scrape of :15692, optional `RABBITMQ_URL` config, connection module with reconnect.
+1. Owner: confirm Prometheus target `rabbitmq` UP; optionally stop/start the broker during a ping
+   run (recovery); add `RABBITMQ_URL=` to `.env.example` (assistant can't read `.env*`).
+2. P5.1: migration `review_jobs` + `message_outbox` (plan in roadmap Phase 5).
 
 ---
 
