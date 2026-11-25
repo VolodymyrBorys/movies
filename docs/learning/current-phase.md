@@ -7,7 +7,7 @@ _Read at session start. Active phase only; when it is finished, move this sectio
 - [x] P5.0 broker + Prometheus scrape + optional `RABBITMQ_URL` + recovering connection (`41eef19`)
 - [x] P5.1 migration `review_jobs` + `message_outbox` (`dd57434`)
 - [x] P5.2 API: 202 + job, `GET /v1/review-jobs/:id` (`4cf17fb`); Gemini stubbed at all call sites (`57d7b59`)
-- [x] P5.3 outbox relay (worker process, publisher confirms) (`00f90a8`); live publish path still to run (`docs/progress/messaging.md` → P5.3)
+- [x] P5.3 outbox relay (worker process, publisher confirms) (`00f90a8`); live publish path verified by the owner 2026-11-25 (`docs/progress/messaging.md` → P5.3)
 - [ ] **P5.4 consumer + topology — next; plan first**
 - [ ] P5.5 metrics / alerts / dashboard
 - [ ] P5.6 graceful shutdown

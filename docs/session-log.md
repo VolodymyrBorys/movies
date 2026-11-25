@@ -46,8 +46,15 @@ Branch `p5-rabbitmq`: `00f90a8` (P5.3) + this docs save. Local branch is 3+ comm
 - Low priority (2026-11-22): under `npm run dev` (`--watch`) a process with `shuttingDown=true` kept
   serving; possible `shutdown()` bug. Check: Ctrl+C under k6 load (no `--watch`) → exit ≤ 15 s.
 
+### Update 2026-11-25 (session 4)
+- Branch pushed (in sync with `origin/p5-rabbitmq`).
+- P5.3 live check passed (owner): returned → retry with backoff → published after a temporary
+  queue was bound; AMQP properties and outbox row correct; worker startup with the broker stopped
+  (give up, late broker, Ctrl+C → `SIGINT`, exit 0). Details: `messaging.md` → P5.3 → Verification.
+  Still not verified: reconnect mid-batch (P5.7).
+
 ### Next steps
-1. Owner: push; optionally run the P5.3 live publish check (`messaging.md` → P5.3 → Verification).
+1. ~~Owner: push; P5.3 live publish check~~ done 2026-11-25.
 2. P5.4 plan (no code until approved): consumer in the worker process, quorum queue
    `reviews.generate` bound to `movies.events` / `review.requested`, prefetch, manual ack, TTL retry
    queues with attempt tracking (DB `attempts` authoritative), DLX → DLQ, `superseded` on version

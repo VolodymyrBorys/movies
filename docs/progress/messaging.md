@@ -98,18 +98,28 @@ LAB: no ordering guarantee across retries / parallel relays (fine for one messag
 - Assistant (2026-11-23): `npx tsc -p .` 0; unit 322/322 (`src/config src/infrastructure src/modules src/workers src/utils src/messaging`; new: `outbox-relay.test.ts` 17, `publish-channel.test.ts` 12). Mutation checks, all caught and restored: ignore `basic.return` (2 failed), `mandatory: false` (1), no wait for `drain` (2), no reopen-timer clear in `open()` (1), ignore `blocked` (1), no `closing` check in `open()` (1), no `rowCount` check in reschedule (2).
 - Review (`backend-reviewer`, 2026-11-23): fixed — signal during startup left the worker hanging with the relay on a closed pool; stale reopen timer from the old connection blocked the reopen on the new one; `blocked` burned attempts; reschedule logged outcomes on 0 rows. Documented — late `basic.return` (table above). Not covered by tests: `src/worker.ts` startup/shutdown (top-level script; check manually: Ctrl+C while the broker is stopped → exits within ~1 s).
 - Owner (2026-11-23, passed; counts not reported): `npm run test:integration` incl. `src/workers/outbox-relay.int.test.ts` (7: mark after ack, unroutable → backoff, dead-letter, two concurrent relays → no message published twice, active/expired lease + `available_at`, order, lease lost → not marked). The concurrency test proves no duplicates, not SKIP LOCKED specifically: plain `FOR UPDATE` would also pass (the lease condition is re-checked after the lock wait).
-- Live check (owner): worker start → "Publish channel open", "Worker started"; Ctrl+C → shutdown in ~0.6 s, PG pools closed (2026-11-23). Publish path and Ctrl+C during startup (broker stopped) still pending:
+- Live check (owner): worker start → "Publish channel open", "Worker started"; Ctrl+C → shutdown in ~0.6 s, PG pools closed (2026-11-23).
+- Live publish path (owner, 2026-11-25, passed), new movie → `POST /v1/movies/:id/review`:
+  - no queue bound → `publishResult=returned`, `lastError="unroutable: no queue bound to movies.events for review.requested"`, `result=retry_scheduled`; `delayMs` 4029 → 8759 → 16789 for attempts 3 → 4 → 5 (observed intervals +≤1 s idle poll); same `messageId` on every attempt;
+  - temporary queue bound → next retry `published=1`; message in the queue: `message_id` = outbox `message_id`, `type=review.requested`, `delivery_mode=2`, `content_type=application/json`, payload `{jobId, movieId, movieVersion, schemaVersion: 1}`, exactly one message;
+  - outbox row: `attempts=6` (5 returned + 1 success; claim increments), `published_at` set, `locked_by`, `dead_lettered_at`, `last_error` NULL.
+- Worker startup with the broker stopped (owner, 2026-11-25, passed): recovery gives up → "Worker failed to start", PG pools closed, exit; broker started during the retries → connects, "Publish channel open", "Worker started"; Ctrl+C while reconnecting → "Worker stopping during startup" `reason=SIGINT`, PG pools closed within 1 ms, exit 0.
   ```
   npm run worker                                # "Publish channel open", "Worker started"
   curl -si -X POST localhost:3000/v1/movies/<id>/review   # 202
-  # worker log: "Outbox message not published; retry scheduled", result=returned (no queue yet)
-  # temporary queue to see a successful publish (delete afterwards):
-  rabbitmqadmin declare queue name=tmp-review durable=false
-  rabbitmqadmin declare binding source=movies.events destination=tmp-review routing_key='review.#'
-  # next retry → "Outbox relay batch done" published=1; message visible in tmp-review
-  rabbitmqadmin delete queue name=tmp-review
+  # worker log: "Outbox message not published; retry scheduled", publishResult=returned (no queue yet)
+  # temporary queue via the management HTTP API (durable: true — the first try with durable:false
+  # failed, error not captured; hypothesis: deprecated transient non-exclusive queues in 4.x):
+  curl -sS -u guest:guest -X PUT localhost:15672/api/queues/%2F/tmp-review \
+    -H 'content-type: application/json' -d '{"durable":true}'                              # 201
+  curl -sS -u guest:guest -X POST localhost:15672/api/bindings/%2F/e/movies.events/q/tmp-review \
+    -H 'content-type: application/json' -d '{"routing_key":"review.#"}'                    # 201
+  # next retry → "Outbox relay batch done" published=1
+  curl -sS -u guest:guest -X POST localhost:15672/api/queues/%2F/tmp-review/get \
+    -H 'content-type: application/json' -d '{"count":5,"ackmode":"ack_requeue_true","encoding":"auto"}'
+  curl -sS -u guest:guest -X DELETE localhost:15672/api/queues/%2F/tmp-review
   ```
-- Not verified: live broker (confirms, returns, reconnect mid-batch); the kill-the-broker exercise is P5.7.
+- Not verified: reconnect mid-batch against a real broker (the kill-the-broker exercise is P5.7); exit code of the "startup failed" path not captured (expected 1).
 
 ## Setup (owner, Homebrew)
 
