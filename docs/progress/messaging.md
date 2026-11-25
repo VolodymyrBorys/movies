@@ -9,8 +9,8 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | P5.0 broker + config + connection | done: unit-tested; live `scripts/rabbitmq-ping.ts` OK (owner, 2026-11-23); Prometheus target `rabbitmq` UP after `rabbitmq-plugins enable rabbitmq_prometheus` (owner, 2026-11-23; the plugin is off by default in Homebrew, management on :15672 is a different plugin) |
 | P5.1 schema (`review_jobs`, `message_outbox`) | done: migration `1795432527618_review_jobs_message_outbox.sql`; integration 36/36 and `migrate:up` on the app DB (owner, 2026-11-23); up → down → up on a disposable DB not reported |
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
-| P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) not yet run |
-| P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | not started |
+| P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) passed (owner, 2026-11-25) |
+| P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | implemented (2026-11-25, uncommitted): `tsc` 0, unit 384/384, 7 mutation checks caught (assistant); integration incl. broker in vhost `movies_test` green (owner); review findings 1–6 open (below); live run pending |
 | P5.5 metrics, alerts, dashboard | not started |
 | P5.6 graceful shutdown | not started |
 | P5.7 exercises | not started |
@@ -120,6 +120,91 @@ LAB: no ordering guarantee across retries / parallel relays (fine for one messag
   curl -sS -u guest:guest -X DELETE localhost:15672/api/queues/%2F/tmp-review
   ```
 - Not verified: reconnect mid-batch against a real broker (the kill-the-broker exercise is P5.7); exit code of the "startup failed" path not captured (expected 1).
+
+## P5.4 — consumer + topology
+
+| File | Role |
+|---|---|
+| `src/messaging/topology.ts` | `movies.events` → `reviews.generate` (quorum, `x-delivery-limit` 10, DLX `movies.dlx`) → `reviews.generate.dlq`; retry queues `reviews.generate.retry.{10s,30s,2m,5m}` (quorum, `x-message-ttl`, dead-letter to `""` / `reviews.generate`). All dead-lettering queues: `at-least-once` + `x-overflow: reject-publish`. Changing a queue argument needs the queue deleted first (406 otherwise → endless reconnect). |
+| `src/messaging/review-consumer.ts` | Confirm channel: topology, `prefetch(4)`, `consume` with manual ack; each delivery bound to its channel and settled at most once; `publishRetry` = default exchange + `mandatory` + confirm (10 s) + `basic.return` matched by `x-retry-id`. Channel-only close / consumer cancelled → reopen after 5 s (as `PublishChannel`). |
+| `src/workers/review-handler.ts` | Decision per delivery (table below); settings `REVIEW_CONSUMER_SETTINGS`: max 5 attempts, deadline 90 s, lease 120 s. |
+| `src/modules/reviews/review-job-processing.repository.ts` | `claim` (`SELECT … FOR UPDATE OF j` + transition, one transaction), `complete` / `release` / `fail` guarded by `locked_by = $worker AND status = 'running'`. |
+| `src/modules/reviews/review-messages.ts` | Zod validation of `review.requested` (queue = trust boundary). |
+| `src/modules/reviews/review-generator.ts`, `src/config/review-generator.ts` | `REVIEW_GENERATOR=stub` (default: real review service, Gemini stub) \| `fake` (LAB, dev-only, refused with `NODE_ENV=production`): `REVIEW_FAKE_LATENCY_MS` (2000), `REVIEW_FAKE_FAILURE_RATE` (0..1, retryable 503). |
+| `src/worker.ts` | recovery `setup` = publish channel + review consumer; shutdown closes the consumer channel first (LAB: in-flight not awaited → redelivered; P5.6). |
+
+### Decision per delivery (DB first, then broker)
+
+| Job state at claim | DB | Broker |
+|---|---|---|
+| invalid message | — | nack(false) → DLQ |
+| missing (movie deleted → cascade) | — | ack |
+| succeeded / failed / superseded | — | ack (duplicate) |
+| running, live lease | — | retry copy 30s → ack |
+| movie version changed | superseded | ack (no generation) |
+| attempts ≥ 5 | failed | nack(false) → DLQ |
+| queued / running with expired lease | running, attempts+1, lease 120 s | generate ↓ |
+| → success | succeeded (guarded) | ack |
+| → transient error (retryable, unknown, deadline) | queued (guarded) | retry copy by attempt (10s/30s/2m/5m) → ack; last attempt → failed + DLQ |
+| → permanent error (`RagInputError`, non-retryable) | failed (guarded) | nack(false) → DLQ |
+| guarded UPDATE matched 0 rows | — | ack (`lease_lost`: new owner decides) |
+| PostgreSQL error | — | retry copy 10s (no attempt counted) → ack |
+| retry copy not confirmed / returned | — | pause 5 s → nack(true) (NOT counted by delivery-limit, see below) |
+
+### Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| Crash after claim, before outcome | Message redelivered; job `running` with lease → `lease_busy` → retry 30s until the lease expires → taken over (attempt counted; billable duplicate if generation had finished) |
+| Crash after retry copy confirmed, before ack | Original redelivered + copy → two deliveries; the second sees the job state (duplicate / lease_busy) |
+| Consumer crash loop on one message | Broker dead-letters after `x-delivery-limit` 10; DB `attempts` also stop it at 5 (claim counts) |
+| Retry publish keeps failing (retry queue deleted, alarm) | `nack(requeue=true)` after a 5 s pause. Transient path: bounded by DB attempts (each redelivery claims again). `lease_busy`: cycles every ~5 s until the lease expires. PostgreSQL AND publish down: cycles every ~5 s until one recovers (LAB: rate-limited, not bounded) |
+| Slow generation > lease | Another consumer takes over; first one's `complete` → `lease_lost`, result discarded |
+| Movie PATCHed after claim | Review for the job's version is stored (job is version-specific) |
+| Retry queue deleted at runtime | `basic.return` → requeue; on reconnect/reopen the topology is re-declared |
+| Message lost anyway (e.g. queue deleted with messages) | Job stays `queued` forever. LAB: production would run a reconciliation job republishing old `queued` jobs |
+| Double retry layers | `generateWithRetries` retries up to 3× in-process → worst case 5 × 3 = 15 billable calls per job; decide before enabling real Gemini (stub today) |
+
+### Broker semantics observed (local RabbitMQ 4.x, 2026-11-25, `review-topology.int.test.ts`)
+
+- `x-delivery-limit` counts **failed deliveries only**: a message taken unacked and returned by a closed channel (consumer crash) is dead-lettered with `x-death` reason `delivery_limit` after the limit.
+- An explicit `nack(requeue=true)` is **not** a failed delivery: 13 requeues in a row → no `x-delivery-count` header, never dead-lettered. First version of the test assumed otherwise and failed; the handler's requeue fallback got a 5 s pause because of this.
+- `nack(requeue=false)` → DLQ with reason `rejected`; retry queue TTL → back to the work queue with reason `expired` (~10 s for the first tier).
+- A non-durable, non-exclusive queue could not be declared via the management API (P5.3 live check); cause not captured.
+
+### Verification
+
+- Assistant (2026-11-25): `npx tsc -p .` 0; unit 384/384 (`src/config src/infrastructure src/modules src/workers src/utils src/messaging`; new: `review-handler.test.ts` 24, `review-consumer.test.ts` 16, `topology.test.ts` 9, `config/review-generator.test.ts` 8, `reviews/review-generator.test.ts` 5). Mutation checks, all caught and restored: ack before the retry publish (8 failed), every error transient (3), no settle-once guard (1), ignore `basic.return` on retry (1), retry tier off by one (4), `lease_lost` treated as success (1), no pause before the requeue fallback (1).
+- Owner (2026-11-25, passed): `npm run test:integration` incl. `review-job-processing.repository.int.test.ts` (16: claim states, takeover, concurrent claims, guarded outcomes) and `review-topology.int.test.ts` (6, broker in vhost `movies_test`: arguments accepted, routing, reject → DLQ, consumer crash past the delivery limit → DLQ, TTL → back to the work queue, ReviewConsumer + confirmed retry publish).
+- Not verified: the requeue pause (added after the integration run; unit-tested + mutation check only); `src/worker.ts` wiring (no automated test).
+- Pending (owner): live run, then re-queue the outbox rows dead-lettered during P5.3 (no queue was bound then):
+  ```
+  npm run worker            # "Review consumer started", "Worker started" reviewGenerator=stub
+  # POST /v1/movies/<id>/review → GET /v1/review-jobs/<jobId>: succeeded, model "stub"
+  REVIEW_GENERATOR=fake REVIEW_FAKE_FAILURE_RATE=1 REVIEW_FAKE_LATENCY_MS=200 npm run worker
+  # POST review → logs retry_scheduled via retry.10s/30s/2m/5m, then exhausted (~8 min);
+  # job failed, message in reviews.generate.dlq
+  # stop worker → POST review → PATCH the movie → start worker → result=superseded
+  ```
+  ```sql
+  SELECT id, attempts, dead_lettered_at FROM message_outbox
+  WHERE routing_key = 'review.requested' AND dead_lettered_at IS NOT NULL AND published_at IS NULL;
+  UPDATE message_outbox SET dead_lettered_at = NULL, attempts = 0, available_at = now(), last_error = NULL
+  WHERE routing_key = 'review.requested' AND dead_lettered_at IS NOT NULL AND published_at IS NULL;
+  ```
+
+### Review (`backend-reviewer`, 2026-11-25) — open, awaiting the owner's decision
+
+No blockers (ack/nack order, settle-once per channel, all UPDATEs vs the CHECK constraints and the partial unique index, reopen/recovery and `basic.return` matching checked). Findings:
+
+1. **Dead-lettered message ⇒ job `queued` forever.** Paths: delivery-limit after repeated crashes/restarts with the message in flight (channel close counts), or the P5.3 relay dead-lettering an outbox row. `POST` then returns the stuck job and the partial unique index blocks a new one until the movie is PATCHed. Options: (a) DLQ consumer marks `queued` → `failed` — race: a duplicate can be dead-lettered while the legit copy waits in a retry queue → false `failed` (recoverable by a new POST); (b) reconciliation re-enqueueing `queued` jobs older than N min (classic fix, also covers P5.3); (c) document + DLQ > 0 alert (P5.5). Assistant recommends (c) now + (b) as a separate step.
+2. Consumer topology failure in the recovery `setup` (`src/worker.ts`) rejects the whole setup → recovery closes the model → the outbox relay stops too (startup: exit; later: endless reconnect). Fix: catch `reviewConsumer.open` errors in `setup`, log, reopen only the consumer.
+3. `review-consumer.ts` handler-throws fallback requeues without the pause → hot loop if it ever fires. Fix: same `requeueDelayMs`.
+4. Lease guard is per process (`workerId`), not per claim: two deliveries of one job in one process (prefetch 4) pass each other's `locked_by` guard after a lease expiry → extra billable generation. Fix: per-claim token in `locked_by`, returned by `claim`, passed to `complete`/`release`/`fail`.
+5. Concurrent-claim int test isn't deterministic (passes without `FOR UPDATE` if the first transaction commits first). Fix: hold transaction A open on a separate client, assert B waits, commit, assert `lease_busy`; mutation-check by removing `FOR UPDATE`.
+6. No unit test for `release`/`fail` throwing after generation (a missing `await` in `return await handleGenerationError` would escape to the fallback unnoticed).
+
+Not verified by the reviewer: `at-least-once` + `x-dead-letter-exchange: ""` on other 4.x versions; duplicates of retry copies under a broker alarm.
 
 ## Setup (owner, Homebrew)
 
