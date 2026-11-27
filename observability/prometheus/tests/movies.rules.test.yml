@@ -63,7 +63,7 @@ tests:
   - name: OutboxDeadLetters fires on the first dead letter (series pre-created at 0)
     interval: 1m
     input_series:
-      - series: 'outbox_events_total{result="dead_lettered"}'
+      - series: 'outbox_events_total{job="movies-api", result="dead_lettered"}'
         values: "0 0 0 1 1 1"
     alert_rule_test:
       - eval_time: 2m
@@ -81,7 +81,7 @@ tests:
   - name: OutboxBacklogTooOld fires when the oldest event stays over 2 minutes
     interval: 1m
     input_series:
-      - series: "outbox_oldest_pending_age_seconds"
+      - series: 'outbox_oldest_pending_age_seconds{job="movies-api"}'
         values: "0 30 90 150 210 270 330"
     alert_rule_test:
       - eval_time: 3m
@@ -100,7 +100,7 @@ tests:
     interval: 1m
     input_series:
       # In promtool, time() at eval_time T is T in seconds; refresh stops at 120s.
-      - series: "outbox_backlog_last_refresh_timestamp_seconds"
+      - series: 'outbox_backlog_last_refresh_timestamp_seconds{job="movies-api"}'
         values: "0 60 120 120 120 120 120 120"
     alert_rule_test:
       - eval_time: 3m
@@ -114,6 +114,222 @@ tests:
             exp_annotations:
               summary: Outbox backlog metrics have not been refreshed for over a minute
               runbook_url: docs/progress/observability.md#outboxbacklogstale
+
+  - name: OutboxBacklogStale ignores the worker's pre-created 0 timestamp (shared registry)
+    interval: 1m
+    input_series:
+      # API gone (MoviesApiDown covers it); the worker exposes the series at 0.
+      - series: 'outbox_backlog_last_refresh_timestamp_seconds{job="movies-worker"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OutboxBacklogStale
+        exp_alerts: []
+
+  # --- messaging (P5.5) ------------------------------------------------------
+
+  - name: WorkerDown fires after 1m of failed scrapes
+    interval: 1m
+    input_series:
+      - series: 'up{job="movies-worker", instance="host.docker.internal:3002"}'
+        values: "1 0 0 0"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WorkerDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: movies-worker
+              instance: host.docker.internal:3002
+            exp_annotations:
+              summary: Prometheus cannot scrape the worker (outbox relay and review consumer)
+              runbook_url: docs/progress/observability.md#workerdown
+
+  - name: RabbitMqDown covers both broker scrape jobs
+    interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq"}'
+        values: "1x5"
+      - series: 'up{job="rabbitmq-detailed"}'
+        values: "0x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RabbitMqDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rabbitmq-detailed
+            exp_annotations:
+              summary: Prometheus cannot scrape RabbitMQ
+              runbook_url: docs/progress/observability.md#rabbitmqdown
+
+  - name: ReviewConsumersMissing fires when the consumer count drops to 0
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_consumers{vhost="/", queue="reviews.generate"}'
+        values: "1 1 0 0 0 0"
+      - series: 'up{job="rabbitmq-detailed"}'
+        values: "1x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ReviewConsumersMissing
+        exp_alerts: [] # pending (for: 2m)
+      - eval_time: 5m
+        alertname: ReviewConsumersMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              vhost: /
+              queue: reviews.generate
+            exp_annotations:
+              summary: No consumer on reviews.generate; review jobs are not processed
+              runbook_url: docs/progress/observability.md#reviewconsumersmissing
+
+  - name: ReviewConsumersMissing fires when the queue is gone but the broker is scraped
+    interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq-detailed"}'
+        values: "1x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ReviewConsumersMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              vhost: /
+              queue: reviews.generate
+            exp_annotations:
+              summary: No consumer on reviews.generate; review jobs are not processed
+              runbook_url: docs/progress/observability.md#reviewconsumersmissing
+
+  - name: ReviewConsumersMissing stays silent while the broker is down (RabbitMqDown fires)
+    interval: 1m
+    input_series:
+      - series: 'up{job="rabbitmq-detailed"}'
+        values: "0x5"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ReviewConsumersMissing
+        exp_alerts: []
+
+  - name: ReviewDeadLetterQueueNotEmpty fires on the first message, without delay
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages{vhost="/", queue="reviews.generate.dlq"}'
+        values: "0 0 2 2"
+      # Other queues are never matched.
+      - series: 'rabbitmq_detailed_queue_messages{vhost="/", queue="reviews.generate"}'
+        values: "5 5 5 5"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReviewDeadLetterQueueNotEmpty
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ReviewDeadLetterQueueNotEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              vhost: /
+              queue: reviews.generate.dlq
+            exp_annotations:
+              summary: reviews.generate.dlq holds 2 message(s)
+              runbook_url: docs/progress/observability.md#reviewdeadletterqueuenotempty
+
+  - name: ReviewQueueBacklog fires after 10m above 50 ready messages
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{vhost="/", queue="reviews.generate"}'
+        values: "60x15"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ReviewQueueBacklog
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ReviewQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              vhost: /
+              queue: reviews.generate
+            exp_annotations:
+              summary: More than 50 review jobs have been waiting in reviews.generate for 10 minutes
+              runbook_url: docs/progress/observability.md#reviewqueuebacklog
+
+  - name: MessageOutboxBacklogTooOld uses the worker's series only
+    interval: 1m
+    input_series:
+      - series: 'message_outbox_oldest_pending_age_seconds{job="movies-worker"}'
+        values: "0 60 130 190 250 310"
+      - series: 'message_outbox_oldest_pending_age_seconds{job="movies-api"}'
+        values: "0x5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MessageOutboxBacklogTooOld
+        exp_alerts: [] # pending
+      - eval_time: 4m
+        alertname: MessageOutboxBacklogTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Oldest unpublished broker message in message_outbox is older than 2 minutes
+              runbook_url: docs/progress/observability.md#messageoutboxbacklogtooold
+
+  - name: MessageOutboxBacklogStale fires when the worker's refresh stops
+    interval: 1m
+    input_series:
+      - series: 'message_outbox_backlog_last_refresh_timestamp_seconds{job="movies-worker"}'
+        values: "0 60 120 120 120 120 120 120"
+      # The API's pre-created 0 is ignored.
+      - series: 'message_outbox_backlog_last_refresh_timestamp_seconds{job="movies-api"}'
+        values: "0x7"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MessageOutboxBacklogStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MessageOutboxBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: message_outbox backlog metrics have not been refreshed for over a minute
+              runbook_url: docs/progress/observability.md#messageoutboxbacklogstale
+
+  - name: MessageOutboxBacklogStale ignores the API's pre-created 0 when the worker is gone
+    interval: 1m
+    input_series:
+      # Worker gone (WorkerDown covers it); the API exposes the series at 0.
+      - series: 'message_outbox_backlog_last_refresh_timestamp_seconds{job="movies-api"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MessageOutboxBacklogStale
+        exp_alerts: []
+
+  - name: MessageOutboxDeadLetters fires while dead-lettered rows exist
+    interval: 1m
+    input_series:
+      - series: 'message_outbox_dead_lettered_messages{job="movies-worker"}'
+        values: "0 3 3 0"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: MessageOutboxDeadLetters
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: MessageOutboxDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "3 message_outbox row(s) dead-lettered by the relay and never published"
+              runbook_url: docs/progress/observability.md#messageoutboxdeadletters
+      - eval_time: 3m
+        alertname: MessageOutboxDeadLetters
+        exp_alerts: [] # re-queued by the operator
 
   - name: CacheErrors is a warning, not critical
     interval: 1m

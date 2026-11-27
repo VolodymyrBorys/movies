@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 
-// HTTP-level test of POST /v1/movies/:id/review: real app, router, params validation,
-// controller, movies service/repository (SQL not executed: PG is mocked), request signal and
-// error mapping. Replaced: PG/Redis/logger, MovieReviewGenerationService (own unit tests) and
-// the deadline (100 ms instead of 30 s). No Gemini calls, no cost.
+// HTTP-level test of POST /v1/movies/:id/review (async, P5.2): real app, router, params
+// validation, controller and review-jobs repository (SQL not executed: PG is mocked — the
+// real SQL, dedupe and atomicity are proven in review-jobs.int.test.ts). PG/Redis/logger
+// replaced; the review generator is mocked only to prove the API never calls it.
 
 vi.mock("../infrastructure/logger.ts", async () => {
   const { pino } = await import("pino");
@@ -24,12 +24,6 @@ vi.mock("../infrastructure/redis.ts", () => ({
   },
 }));
 
-vi.mock("../modules/rag/rag-deadlines.ts", () => ({
-  SEARCH_DEADLINE_MS: 100,
-  ANSWER_DEADLINE_MS: 100,
-  REVIEW_DEADLINE_MS: 100,
-}));
-
 const { generate } = vi.hoisted(() => ({ generate: vi.fn() }));
 
 vi.mock("../modules/rag/generation/movie-review-generation.service.ts", () => ({
@@ -38,170 +32,229 @@ vi.mock("../modules/rag/generation/movie-review-generation.service.ts", () => ({
 
 const { app } = await import("../app.ts");
 const { PG } = await import("../infrastructure/postgres.ts");
-const { RagNotConfiguredError } = await import("../config/rag.ts");
-const { RagUpstreamError } = await import("../modules/rag/rag.errors.ts");
 
 const readQuery = vi.mocked(PG.readQuery);
 const writeQuery = vi.mocked(PG.writeQuery);
 const transaction = vi.mocked(PG.transaction);
 
-const ID = "11111111-1111-4111-8111-111111111111";
-const PATH = `/v1/movies/${ID}/review`;
+const MOVIE_ID = "11111111-1111-4111-8111-111111111111";
+const JOB_ID = "22222222-2222-4222-8222-222222222222";
+const PATH = `/v1/movies/${MOVIE_ID}/review`;
 
-const movie = {
-  id: ID,
-  title: "Arrival",
-  description: "A linguist is recruited to talk to visitors.",
-  release_year: 2016,
-  duration_minutes: 116,
-  created_at: "2026-11-19T10:00:00.123456Z",
-  status: "published",
-  version: 3,
-};
-
-type GenerateInput = {
-  title: string;
-  description: string | null;
-  releaseYear: number;
-  durationMinutes: number;
-  signal: AbortSignal;
-};
-
-function lastInput(): GenerateInput {
-  return generate.mock.lastCall?.[0] as GenerateInput;
+function jobRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: JOB_ID,
+    movie_id: MOVIE_ID,
+    movie_version: 3,
+    status: "queued",
+    attempts: 0,
+    review: null,
+    model: null,
+    created_at: "2026-11-23T10:00:00.123456Z",
+    started_at: null,
+    finished_at: null,
+    ...overrides,
+  };
 }
 
-/** Rejects like the SDK (bare AbortError) once the signal aborts; never settles otherwise. */
-function pendingUntilAborted(input: GenerateInput): Promise<never> {
-  const abortError = () => Object.assign(new Error("aborted"), { name: "AbortError" });
-  return new Promise((_, reject) => {
-    if (input.signal.aborted) {
-      reject(abortError());
-      return;
+interface FakeDb {
+  movie?: unknown[];
+  inserted?: unknown[];
+  existing?: unknown[];
+  insertError?: unknown;
+}
+
+/** Routes each SQL statement inside PG.transaction to canned rows. */
+function fakeTransaction(db: FakeDb) {
+  const query = vi.fn(async (sql: string, _params?: unknown[]) => {
+    if (/FROM movies/.test(sql)) return { rows: db.movie ?? [{ version: 3 }] };
+    if (/INSERT INTO review_jobs/.test(sql)) {
+      if (db.insertError !== undefined) throw db.insertError;
+      return { rows: db.inserted ?? [] };
     }
-    input.signal.addEventListener("abort", () => reject(abortError()), { once: true });
+    if (/FROM review_jobs/.test(sql)) return { rows: db.existing ?? [] };
+    if (/INSERT INTO message_outbox/.test(sql)) return { rows: [] };
+    throw new Error(`unexpected SQL: ${sql}`);
   });
+  transaction.mockImplementation(async (callback) => callback({ query } as never));
+  return query;
+}
+
+function calls(query: ReturnType<typeof fakeTransaction>, pattern: RegExp) {
+  return query.mock.calls.filter(([sql]) => pattern.test(sql));
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  writeQuery.mockResolvedValue({ rows: [movie] } as never);
-  generate.mockResolvedValue({ review: "A quiet, cerebral film.", model: "gemini-3.8-flash" });
 });
 
-describe("POST /v1/movies/:id/review", () => {
-  it("returns the review with the movie id and the version it was generated from", async () => {
+describe("POST /v1/movies/:id/review (async job)", () => {
+  it("creates a job for the current movie version: 202 + Location, camelCase body", async () => {
+    fakeTransaction({ inserted: [jobRow()] });
+
     const res = await request(app).post(PATH);
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
+    expect(res.headers.location).toBe(`/v1/review-jobs/${JOB_ID}`);
     expect(res.body).toEqual({
       data: {
-        movieId: ID,
+        id: JOB_ID,
+        movieId: MOVIE_ID,
         movieVersion: 3,
-        review: "A quiet, cerebral film.",
-        model: "gemini-3.8-flash",
+        status: "queued",
+        attempts: 0,
+        review: null,
+        model: null,
+        createdAt: "2026-11-23T10:00:00.123456Z",
+        startedAt: null,
+        finishedAt: null,
       },
     });
   });
 
-  it("reads the movie from the primary and passes its fields and a request signal", async () => {
+  it("inserts the job for the version it read and review.requested in the same transaction", async () => {
+    const query = fakeTransaction({ inserted: [jobRow()] });
+
     await request(app).post(PATH);
 
-    expect(writeQuery).toHaveBeenCalledTimes(1);
-    expect(readQuery).not.toHaveBeenCalled();
-    expect(writeQuery.mock.calls[0]?.[1]).toEqual([ID]);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(calls(query, /INSERT INTO review_jobs/)[0]?.[1]).toEqual([MOVIE_ID, 3]);
 
-    const input = lastInput();
-    expect(input).toMatchObject({
-      title: "Arrival",
-      description: "A linguist is recruited to talk to visitors.",
-      releaseYear: 2016,
-      durationMinutes: 116,
+    const outbox = calls(query, /INSERT INTO message_outbox/);
+    expect(outbox).toHaveLength(1);
+    const [aggregateType, aggregateId, routingKey, payload] = outbox[0]?.[1] as unknown[];
+    expect([aggregateType, aggregateId, routingKey]).toEqual([
+      "review_job",
+      JOB_ID,
+      "review.requested",
+    ]);
+    expect(JSON.parse(payload as string)).toEqual({
+      schemaVersion: 1,
+      jobId: JOB_ID,
+      movieId: MOVIE_ID,
+      movieVersion: 3,
     });
-    expect(input.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("does not write anything (the review is not persisted)", async () => {
+  it("never calls the review generator (the worker does, P5.4)", async () => {
+    fakeTransaction({ inserted: [jobRow()] });
+
     await request(app).post(PATH);
 
-    expect(transaction).not.toHaveBeenCalled();
-    // The only PG call is the SELECT by id.
-    expect(writeQuery.mock.calls[0]?.[0]).toMatch(/^\s*SELECT/);
+    expect(generate).not.toHaveBeenCalled();
   });
 
-  it("returns 404 without calling Gemini when the movie doesn't exist", async () => {
-    writeQuery.mockResolvedValue({ rows: [] } as never);
+  it.each([["queued"], ["running"]])(
+    "returns the existing %s job with 202 and enqueues no new message",
+    async (status) => {
+      const query = fakeTransaction({ inserted: [], existing: [jobRow({ status })] });
+
+      const res = await request(app).post(PATH);
+
+      expect(res.status).toBe(202);
+      expect(res.headers.location).toBe(`/v1/review-jobs/${JOB_ID}`);
+      expect(res.body.data.status).toBe(status);
+      expect(calls(query, /INSERT INTO message_outbox/)).toHaveLength(0);
+    },
+  );
+
+  it("returns an already succeeded job with 200 and the review", async () => {
+    const succeeded = jobRow({
+      status: "succeeded",
+      attempts: 1,
+      review: "A quiet, cerebral film.",
+      model: "gemini-3.8-flash",
+      started_at: "2026-11-23T10:00:01.000001Z",
+      finished_at: "2026-11-23T10:00:05.000002Z",
+    });
+    const query = fakeTransaction({ inserted: [], existing: [succeeded] });
 
     const res = await request(app).post(PATH);
 
-    expect(res.status).toBe(404);
-    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
-    expect(generate).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.headers.location).toBe(`/v1/review-jobs/${JOB_ID}`);
+    expect(res.body.data).toMatchObject({
+      status: "succeeded",
+      review: "A quiet, cerebral film.",
+      model: "gemini-3.8-flash",
+      finishedAt: "2026-11-23T10:00:05.000002Z",
+    });
+    expect(calls(query, /INSERT INTO message_outbox/)).toHaveLength(0);
   });
 
-  it("returns 400 for a non-uuid id without touching PG or Gemini", async () => {
-    const res = await request(app).post("/v1/movies/not-a-uuid/review");
+  it("retries the insert once when the conflicting job left the active set", async () => {
+    // Round 1: conflict, but the job is gone from queued/running/succeeded by the SELECT.
+    let insertRound = 0;
+    const query = vi.fn(async (sql: string) => {
+      if (/FROM movies/.test(sql)) return { rows: [{ version: 3 }] };
+      if (/INSERT INTO review_jobs/.test(sql)) {
+        insertRound += 1;
+        return { rows: insertRound === 1 ? [] : [jobRow()] };
+      }
+      if (/FROM review_jobs/.test(sql)) return { rows: [] };
+      return { rows: [] };
+    });
+    transaction.mockImplementation(async (callback) => callback({ query } as never));
 
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe("VALIDATION_ERROR");
-    expect(writeQuery).not.toHaveBeenCalled();
-    expect(generate).not.toHaveBeenCalled();
+    const res = await request(app).post(PATH);
+
+    expect(res.status).toBe(202);
+    expect(insertRound).toBe(2);
+    expect(calls(query, /INSERT INTO message_outbox/)).toHaveLength(1);
   });
 
-  it("answers 500 for a DB failure (regular path, not a RAG error)", async () => {
-    writeQuery.mockRejectedValue(new Error("connection terminated"));
+  it("gives up after 2 rounds with a 500 (bounded, no endless loop)", async () => {
+    const query = fakeTransaction({ inserted: [], existing: [] });
 
     const res = await request(app).post(PATH);
 
     expect(res.status).toBe(500);
     expect(res.body.error.code).toBe("INTERNAL_ERROR");
-    expect(generate).not.toHaveBeenCalled();
+    expect(calls(query, /INSERT INTO review_jobs/)).toHaveLength(2);
   });
 
-  it.each([
-    [true, 503, "DEPENDENCY_UNAVAILABLE"],
-    [false, 502, "DEPENDENCY_FAILED"],
-  ])("maps a Gemini failure (retryable=%s) to %i", async (retryable, status, code) => {
-    generate.mockRejectedValue(
-      new RagUpstreamError("generate", "generate failed: HTTP 503 <raw>", { retryable }),
-    );
+  it("returns 404 without inserting anything when the movie doesn't exist", async () => {
+    const query = fakeTransaction({ movie: [] });
 
     const res = await request(app).post(PATH);
 
-    expect(res.status).toBe(status);
-    expect(res.body.error.code).toBe(code);
-    expect(JSON.stringify(res.body)).not.toContain("<raw>");
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
+    expect(calls(query, /INSERT/)).toHaveLength(0);
   });
 
-  it("answers 503 RAG_NOT_CONFIGURED without Gemini config", async () => {
-    generate.mockRejectedValue(new RagNotConfiguredError());
+  it("returns 404 when the movie is deleted between the SELECT and the INSERT (FK violation)", async () => {
+    fakeTransaction({
+      insertError: Object.assign(new Error("violates foreign key constraint"), {
+        code: "23503",
+        constraint: "review_jobs_movie_fk",
+      }),
+    });
 
     const res = await request(app).post(PATH);
 
-    expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe("RAG_NOT_CONFIGURED");
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("MOVIE_NOT_FOUND");
   });
 
-  it("answers 504 when the deadline passes during generation", async () => {
-    generate.mockImplementation(pendingUntilAborted);
+  it("answers 500 for any other DB error (other FK, connection loss)", async () => {
+    fakeTransaction({
+      insertError: Object.assign(new Error("fk"), { code: "23503", constraint: "other_fk" }),
+    });
 
     const res = await request(app).post(PATH);
 
-    expect(res.status).toBe(504);
-    expect(res.body.error.code).toBe("DEADLINE_EXCEEDED");
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe("INTERNAL_ERROR");
   });
 
-  it("does not start generation when the deadline passed during the DB read", async () => {
-    writeQuery.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          setTimeout(() => resolve({ rows: [movie] } as never), 150);
-        }),
-    );
+  it("returns 400 for a non-uuid id without touching PG", async () => {
+    const res = await request(app).post("/v1/movies/not-a-uuid/review");
 
-    const res = await request(app).post(PATH);
-
-    expect(res.status).toBe(504);
-    expect(generate).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(transaction).not.toHaveBeenCalled();
+    expect(writeQuery).not.toHaveBeenCalled();
+    expect(readQuery).not.toHaveBeenCalled();
   });
 });

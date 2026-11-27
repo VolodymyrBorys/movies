@@ -23,6 +23,7 @@ const { GeminiGenerationService } = await import(
   "./gemini-generation.service.ts"
 );
 const { RagUpstreamError } = await import("../rag.errors.ts");
+const { GEMINI_STUB_TEXT, GEMINI_STUB_MODEL } = await import("../gemini-stub.ts");
 const { ragGenerationAttemptsTotal, ragStageDuration, ragTokensTotal } = await import(
   "../../../infrastructure/metrics.ts"
 );
@@ -50,7 +51,8 @@ function pendingUntilAborted({ config }: GenerateArgs): Promise<never> {
 }
 
 describe("GeminiGenerationService", () => {
-  const service = new GeminiGenerationService();
+  // The real Gemini path (client mocked); the stub has its own describe below.
+  const service = new GeminiGenerationService({ geminiStub: false });
 
   beforeEach(() => {
     generateContent.mockReset();
@@ -399,5 +401,35 @@ describe("GeminiGenerationService", () => {
       await expect(service.generate(input)).resolves.toMatchObject({ answer: "answer" });
       expect((await tokens("prompt")) - before).toBe(50);
     });
+  });
+});
+
+describe("GeminiGenerationService Gemini stub (default)", () => {
+  beforeEach(() => {
+    generateContent.mockReset();
+  });
+
+  it("returns the stub answer without calling Gemini", async () => {
+    await expect(new GeminiGenerationService().generate(input)).resolves.toEqual({
+      answer: GEMINI_STUB_TEXT,
+      model: GEMINI_STUB_MODEL,
+    });
+    expect(generateContent).not.toHaveBeenCalled();
+  });
+
+  it("still validates the input before the stub", async () => {
+    await expect(
+      new GeminiGenerationService().generate({ ...input, context: "  " }),
+    ).rejects.toThrow("Context cannot be empty");
+  });
+
+  it("rejects an already aborted caller like the real call", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("deadline"));
+
+    await expect(
+      new GeminiGenerationService().generate({ ...input, signal: controller.signal }),
+    ).rejects.toThrow("deadline");
+    expect(generateContent).not.toHaveBeenCalled();
   });
 });

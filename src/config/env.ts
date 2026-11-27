@@ -22,6 +22,8 @@ const LOG_LEVELS = [
   "silent",
 ] as const;
 
+const SERVICE_NAMES = ["movies-api", "movies-worker"] as const;
+
 // Must stay below the 15 s forced-exit timer in server.ts (delay counts toward it).
 const MAX_SHUTDOWN_DELAY_MS = 10_000;
 
@@ -43,7 +45,12 @@ const EnvSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
 
+    // Which process this is: `service` in logs and metrics. An enum, not free text: the value
+    // becomes a metric label. `npm run worker` sets movies-worker.
+    SERVICE_NAME: z.enum(SERVICE_NAMES).default("movies-api"),
     PORT: port.default(3000),
+    // Worker process only (P5.5): its /metrics endpoint (the worker has no API server).
+    WORKER_METRICS_PORT: port.default(3002),
     LOG_LEVEL: z.enum(LOG_LEVELS).default("info"),
     // Time between "not ready" and closing the HTTP server, so a load balancer /
     // Kubernetes endpoints stop routing new requests first. 0 for local runs.
@@ -103,6 +110,11 @@ const EnvSchema = z
 export type NodeEnv = "development" | "test" | "production";
 export type PgSslMode = "disable" | "verify-full";
 export type LogLevel = (typeof LOG_LEVELS)[number];
+export type ServiceName = (typeof SERVICE_NAMES)[number];
+
+export interface WorkerConfig {
+  readonly metricsPort: number;
+}
 
 export interface ServerConfig {
   readonly port: number;
@@ -139,7 +151,9 @@ export interface PostgresConfig {
 
 export interface AppConfig {
   readonly nodeEnv: NodeEnv;
+  readonly serviceName: ServiceName;
   readonly server: ServerConfig;
+  readonly worker: WorkerConfig;
   readonly log: LogConfig;
   readonly postgres: PostgresConfig;
   readonly redis: RedisConfig;
@@ -170,10 +184,12 @@ export function loadConfig(source: NodeJS.ProcessEnv): AppConfig {
 
   return Object.freeze({
     nodeEnv: env.NODE_ENV,
+    serviceName: env.SERVICE_NAME,
     server: Object.freeze({
       port: env.PORT,
       shutdownDelayMs: env.SHUTDOWN_DELAY_MS,
     }),
+    worker: Object.freeze({ metricsPort: env.WORKER_METRICS_PORT }),
     log: Object.freeze({ level: env.LOG_LEVEL }),
     redis: Object.freeze({
       url: env.REDIS_URL,

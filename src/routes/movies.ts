@@ -12,7 +12,7 @@ import {
   getMovies,
   updateMovie,
 } from "../modules/movies/movies.controller.ts";
-import { reviewMovie } from "../modules/movies/movie-review.controller.ts";
+import { requestMovieReview } from "../modules/reviews/review-jobs.controller.ts";
 import { createMovieBodySchema } from "../modules/movies/validation/create-movie.ts";
 import { movieIdParamsSchema } from "../modules/movies/validation/movie-id-params.ts";
 import { updateMovieBodySchema } from "../modules/movies/validation/update-movie.ts";
@@ -53,5 +53,5 @@ router.delete(
 router.post(
   "/movies/:id/review",
   validate("params", movieIdParamsSchema),
-  asyncHandler(reviewMovie),
+  asyncHandler(requestMovieReview),
 );

@@ -29,7 +29,7 @@ export async function resetState(): Promise<void> {
   }
 
   await PG.writeQuery(
-    "TRUNCATE movies, cache_invalidation_outbox RESTART IDENTITY",
+    "TRUNCATE movies, cache_invalidation_outbox, review_jobs, message_outbox RESTART IDENTITY",
   );
   await REDIS.client.flushDb();
 }
