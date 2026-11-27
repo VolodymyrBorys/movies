@@ -2,9 +2,19 @@
 
 _Read at session start. Active phase only; when it is finished, move this section back into `docs/learning/phases.md` (in phase order) and put the next phase here. Previous phase P5 (RabbitMQ): `docs/learning/phases.md` → Phase 5, `docs/progress/messaging.md`._
 
-## Status
+## Status (branch `p6-tracing`, from `master` `f37747f`)
 
-Chosen by the owner 2026-11-27 after closing P5. **Not started: no plan yet.** Per the working agreement (`docs/learning-roadmap.md` §7) the phase starts with a plan for approval: re-check what exists (OpenTelemetry packages installed, never initialized; pino logger with `requestId`; API and worker are separate processes), choose the tracing backend (Jaeger or Tempo) and the log pipeline, list required approvals (dependencies, compose services, config).
+Plan approved by the owner 2026-11-27 (details, findings, verification: `docs/progress/tracing.md`).
+
+- [ ] **6.0 spike — current.** `src/instrumentation.ts` (`node --import`, off unless `OTEL_TRACES_EXPORTER` is set; sync `module.registerHooks()` via `import-in-the-middle/register-hooks.mjs`) + `src/types/import-in-the-middle.d.ts`; committed on `p6-tracing` (live run still pending). Patching proven offline (pg span, express/http/redis/amqplib wrapped). **Next: owner live run** (API + worker with `OTEL_TRACES_EXPORTER=console`, from the project root) → span names → record in `tracing.md`
+- [ ] 6.1 OTel Collector + Tempo in `observability/compose.yml`, Grafana datasource; OTLP exporter; flush on shutdown; drop `process.command_args` from the resource; direct deps `import-in-the-middle@3.5.3`, `@opentelemetry/exporter-trace-otlp-proto@0.300.0` (`npm install` by the owner)
+- [ ] 6.2 context through the outbox: `message_outbox.trace_context jsonb NULL` (expand-only migration) written in the POST transaction; relay restores it as parent of publish; consumer extracts; retry copies carry `traceparent`; manual spans (outbox claim, review claim, generation, retry publish)
+- [ ] 6.3 `trace_id`/`span_id` in pino (`instrumentation-pino`, correlation only)
+- [ ] 6.4 span data safety (no prompts/review text/keys; undici spans of Gemini/Qdrant; noisy fs/dns/net off)
+- [ ] 6.5 verification: in-memory exporter test (one `trace_id` POST → outbox → publish → consume; `x-request-id` + `trace_id` in API and worker logs); owner exercises: sampling 100% vs 10% under k6, tail sampling in the collector
+- [ ] 6B centralized logs in the owner's local **Elasticsearch/Kibana 9.5.5** (native, not compose): pino → OTLP logs → Collector → `elasticsearch` exporter → `logs-*` data stream; TLS via mounted `http_ca.crt` + `server_name_override: localhost`; least-privilege API key in `observability/.env`; `@custom` mappings, ILM, saved searches, error dashboard. Separate plan after 6.3
+
+Decisions (owner, 2026-11-27): backend **Tempo** (Grafana already present; exemplars; drill in one UI); **OTel Collector** between app and backends; trace context in a new **outbox column** (message contract unchanged); **parent-child** (one trace API → worker incl. retries; span links = production alternative); OTel packages used directly become direct deps; commits after 6.0, 6.1, 6.2, 6.3–6.5; logs backend = local ES/Kibana. Open: dual-export traces to ES as well (assistant recommends, as a 6B exercise).
 
 ## Phase plan (moved verbatim from `docs/learning/phases.md`, 2026-11-27)
 
