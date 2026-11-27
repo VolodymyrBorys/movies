@@ -3,6 +3,16 @@ import type { ConfirmChannel, Message } from "amqplib";
 import type { QueryResultRow } from "pg";
 import { PG } from "../infrastructure/postgres.ts";
 import { logger as rootLogger } from "../infrastructure/logger.ts";
+import {
+  messageOutboxBacklogRefreshedAt,
+  messageOutboxDeadLetteredMessages,
+  messageOutboxEventsTotal,
+  messageOutboxOldestPendingAge,
+  messageOutboxPendingMessages,
+  messageOutboxPublishTotal,
+  type MessageOutboxEventResult,
+  type MessageOutboxPublishResult,
+} from "../infrastructure/metrics.ts";
 import { EVENTS_EXCHANGE } from "../messaging/topology.ts";
 
 // Outbox relay (P5.3): message_outbox → RabbitMQ with publisher confirms.
@@ -46,7 +56,7 @@ interface OutboxMessageRow extends QueryResultRow {
   attempts: number;
 }
 
-export type PublishResult = "published" | "returned" | "publish_failed" | "timeout";
+export type PublishResult = MessageOutboxPublishResult;
 
 type PublishOutcome =
   | { result: "published" }
@@ -219,7 +229,8 @@ async function publishBatch(
   }
 }
 
-async function markPublished(ids: string[]): Promise<void> {
+/** Returns how many rows were marked (the rest lost their lease). */
+async function markPublished(ids: string[]): Promise<number> {
   const result = await PG.writeQuery(
     `
       UPDATE message_outbox
@@ -235,16 +246,21 @@ async function markPublished(ids: string[]): Promise<void> {
     [ids, workerId],
   );
 
-  if (result.rowCount !== ids.length) {
+  const marked = result.rowCount ?? 0;
+  if (marked !== ids.length) {
     // Lease lost (expired and taken over): the other relay republishes → duplicate message.
     logger.warn(
-      { expected: ids.length, marked: result.rowCount },
+      { expected: ids.length, marked },
       "Some confirmed outbox messages were not marked published (lease lost)",
     );
   }
+  return marked;
 }
 
-async function scheduleRetry(row: OutboxMessageRow, outcome: PublishOutcome): Promise<void> {
+async function scheduleRetry(
+  row: OutboxMessageRow,
+  outcome: PublishOutcome,
+): Promise<MessageOutboxEventResult> {
   const error = "error" in outcome ? outcome.error.slice(0, 4_000) : null;
   const context = {
     outboxId: row.id,
@@ -271,10 +287,10 @@ async function scheduleRetry(row: OutboxMessageRow, outcome: PublishOutcome): Pr
     );
     if (result.rowCount !== 1) {
       logLeaseLost(context);
-      return;
+      return "lease_lost";
     }
     logger.error({ ...context, result: "dead_lettered" }, "Outbox message dead-lettered");
-    return;
+    return "dead_lettered";
   }
 
   const delayMs = retryDelayMs(row.attempts);
@@ -293,12 +309,13 @@ async function scheduleRetry(row: OutboxMessageRow, outcome: PublishOutcome): Pr
   );
   if (result.rowCount !== 1) {
     logLeaseLost(context);
-    return;
+    return "lease_lost";
   }
   logger.warn(
     { ...context, result: "retry_scheduled", delayMs },
     "Outbox message not published; retry scheduled",
   );
+  return "retry_scheduled";
 }
 
 // The UPDATE matched nothing: another relay took the row over after our lease expired (or it
@@ -330,6 +347,7 @@ export async function runOutboxRelayBatch(
   const counts: Partial<Record<PublishResult, number>> = {};
   for (const { outcome } of results) {
     counts[outcome.result] = (counts[outcome.result] ?? 0) + 1;
+    messageOutboxPublishTotal.inc({ result: outcome.result });
   }
 
   const publishedIds = results
@@ -338,9 +356,12 @@ export async function runOutboxRelayBatch(
 
   if (publishedIds.length > 0) {
     try {
-      await markPublished(publishedIds);
+      const marked = await markPublished(publishedIds);
+      messageOutboxEventsTotal.inc({ result: "published" }, marked);
+      messageOutboxEventsTotal.inc({ result: "lease_lost" }, publishedIds.length - marked);
     } catch (error) {
       // Confirmed but not marked: republished after the lease expires (duplicate).
+      messageOutboxEventsTotal.inc({ result: "db_error" }, publishedIds.length);
       logger.error(
         { err: error, count: publishedIds.length },
         "Could not mark confirmed outbox messages as published",
@@ -351,13 +372,66 @@ export async function runOutboxRelayBatch(
   for (const { row, outcome } of results) {
     if (outcome.result === "published") continue;
     try {
-      await scheduleRetry(row, outcome);
+      messageOutboxEventsTotal.inc({ result: await scheduleRetry(row, outcome) });
     } catch (error) {
       // PostgreSQL unavailable too: the lease expires and the row is claimed again.
+      messageOutboxEventsTotal.inc({ result: "db_error" });
       logger.error({ err: error, outboxId: row.id }, "Could not reschedule outbox message");
     }
   }
 
   logger.info({ claimed: rows.length, ...counts }, "Outbox relay batch done");
   return rows.length;
+}
+
+// Sampled by the relay loop, not on scrape (same reasoning as refreshOutboxBacklogMetrics in
+// cache-invalidation.ts: /metrics must not depend on PostgreSQL).
+const BACKLOG_REFRESH_INTERVAL_MS = 10_000;
+let lastBacklogRefreshMs = 0;
+
+/**
+ * Updates the message_outbox backlog gauges at most once per interval; runs even while the
+ * broker is down (that is when the backlog grows). Failures are logged and keep the previous
+ * values; staleness shows in message_outbox_backlog_last_refresh_timestamp_seconds.
+ *
+ * LAB: simplified — `published_at IS NULL` matches no index except for the pending part, so
+ * this is a sequential scan of message_outbox every 10 s, and published rows are never
+ * deleted (hypothesis: fine at lab volume, not measured). Production would add a retention
+ * job for published rows and/or a partial index for dead-lettered ones.
+ */
+export async function refreshMessageOutboxBacklogMetrics(
+  nowMs: number = Date.now(),
+): Promise<void> {
+  if (nowMs - lastBacklogRefreshMs < BACKLOG_REFRESH_INTERVAL_MS) return;
+  lastBacklogRefreshMs = nowMs;
+
+  try {
+    const { rows } = await PG.writeQuery<{
+      pending: number;
+      oldest_age_seconds: number;
+      dead_lettered: number;
+    }>(
+      `
+        SELECT
+          count(*) FILTER (WHERE dead_lettered_at IS NULL)::int AS pending,
+          COALESCE(
+            EXTRACT(EPOCH FROM now() - min(created_at) FILTER (WHERE dead_lettered_at IS NULL)),
+            0
+          )::float8 AS oldest_age_seconds,
+          count(*) FILTER (WHERE dead_lettered_at IS NOT NULL)::int AS dead_lettered
+        FROM message_outbox
+        WHERE published_at IS NULL
+      `,
+    );
+
+    const row = rows[0];
+    if (row === undefined) throw new Error("Backlog query returned no rows");
+
+    messageOutboxPendingMessages.set(row.pending);
+    messageOutboxOldestPendingAge.set(row.oldest_age_seconds);
+    messageOutboxDeadLetteredMessages.set(row.dead_lettered);
+    messageOutboxBacklogRefreshedAt.set(nowMs / 1000);
+  } catch (error) {
+    logger.warn({ err: error }, "Message outbox backlog metrics refresh failed");
+  }
 }

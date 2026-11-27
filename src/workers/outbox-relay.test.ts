@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeConfirmChannel } from "../test/fake-confirm-channel.ts";
+import { metricValue } from "../test/metric-value.ts";
 
 // Outbox relay with PostgreSQL replaced: publish/confirm handling and which UPDATE follows.
 // SQL semantics (SKIP LOCKED, lease, ordering, backoff in the DB) are covered by
@@ -28,7 +29,9 @@ vi.mock("../infrastructure/postgres.ts", () => ({
   PG: { transaction: vi.fn(), writeQuery: vi.fn() },
 }));
 
-const { runOutboxRelayBatch, OUTBOX_RELAY_SETTINGS } = await import("./outbox-relay.ts");
+const { runOutboxRelayBatch, refreshMessageOutboxBacklogMetrics, OUTBOX_RELAY_SETTINGS } =
+  await import("./outbox-relay.ts");
+const metrics = await import("../infrastructure/metrics.ts");
 const { EVENTS_EXCHANGE } = await import("../messaging/topology.ts");
 const { PG } = await import("../infrastructure/postgres.ts");
 
@@ -281,5 +284,105 @@ describe("runOutboxRelayBatch", () => {
     await runOutboxRelayBatch(channel.asRelayChannel());
 
     expect(updates().map((u) => u.kind)).toEqual(["published", "retry"]);
+  });
+});
+
+describe("relay metrics", () => {
+  // Counters are process-wide: compare deltas.
+  async function snapshot() {
+    const read = async (metric: typeof metrics.messageOutboxPublishTotal, results: readonly string[]) =>
+      Object.fromEntries(
+        await Promise.all(results.map(async (r) => [r, await metricValue(metric, { result: r })])),
+      ) as Record<string, number>;
+    return {
+      publish: await read(metrics.messageOutboxPublishTotal, metrics.MESSAGE_OUTBOX_PUBLISH_RESULTS),
+      events: await read(metrics.messageOutboxEventsTotal, metrics.MESSAGE_OUTBOX_EVENT_RESULTS),
+    };
+  }
+  async function deltaSince(before: Awaited<ReturnType<typeof snapshot>>) {
+    const after = await snapshot();
+    const diff = (a: Record<string, number>, b: Record<string, number>) =>
+      Object.fromEntries(
+        Object.entries(a)
+          .map(([k, v]) => [k, v - (b[k] ?? 0)] as const)
+          .filter(([, v]) => v !== 0),
+      );
+    return { publish: diff(after.publish, before.publish), events: diff(after.events, before.events) };
+  }
+
+  it("pre-creates every result series at 0 (increase() sees the first event)", async () => {
+    // Fresh module instance: earlier tests in this file already created the series.
+    vi.resetModules();
+    const fresh = await import("../infrastructure/metrics.ts");
+    for (const [name, results] of [
+      ["message_outbox_events_total", fresh.MESSAGE_OUTBOX_EVENT_RESULTS],
+      ["message_outbox_publish_total", fresh.MESSAGE_OUTBOX_PUBLISH_RESULTS],
+    ] as const) {
+      const text = await fresh.metricsRegistry.getSingleMetricAsString(name);
+      for (const result of results) {
+        expect(text).toContain(`${name}{result="${result}",service="movies-api"} 0`);
+      }
+    }
+  });
+
+  it("counts the broker result per publish and the DB outcome per row", async () => {
+    claim([row(1), row(2), row(3, OUTBOX_RELAY_SETTINGS.maxAttempts)]);
+    const before = await snapshot();
+
+    await runOutboxRelayBatch(new FakeConfirmChannel(["ack", "return", "nack"]).asRelayChannel());
+
+    expect(await deltaSince(before)).toEqual({
+      publish: { published: 1, returned: 1, publish_failed: 1 },
+      events: { published: 1, retry_scheduled: 1, dead_lettered: 1 },
+    });
+  });
+
+  it("counts confirmed rows that could not be marked as lease_lost", async () => {
+    claim([row(1), row(2)]);
+    writeQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] } as never);
+    const before = await snapshot();
+
+    await runOutboxRelayBatch(new FakeConfirmChannel("ack").asRelayChannel());
+
+    expect((await deltaSince(before)).events).toEqual({ published: 1, lease_lost: 1 });
+  });
+
+  it("counts failed mark and reschedule UPDATEs as db_error", async () => {
+    claim([row(1), row(2)]);
+    writeQuery.mockRejectedValue(new Error("PG down"));
+    const before = await snapshot();
+
+    await runOutboxRelayBatch(new FakeConfirmChannel(["ack", "nack"]).asRelayChannel());
+
+    expect((await deltaSince(before)).events).toEqual({ db_error: 2 });
+  });
+});
+
+describe("refreshMessageOutboxBacklogMetrics", () => {
+  const gauges = async () => ({
+    pending: await metricValue(metrics.messageOutboxPendingMessages),
+    oldest: await metricValue(metrics.messageOutboxOldestPendingAge),
+    deadLettered: await metricValue(metrics.messageOutboxDeadLetteredMessages),
+    refreshedAt: await metricValue(metrics.messageOutboxBacklogRefreshedAt),
+  });
+
+  it("sets the gauges from one query, at most once per 10 s, and keeps them on failure", async () => {
+    writeQuery.mockResolvedValueOnce({
+      rows: [{ pending: 3, oldest_age_seconds: 42.5, dead_lettered: 2 }],
+    } as never);
+
+    await refreshMessageOutboxBacklogMetrics(1_000_000_000);
+    expect(await gauges()).toEqual({ pending: 3, oldest: 42.5, deadLettered: 2, refreshedAt: 1_000_000 });
+    expect(writeQuery.mock.calls[0]?.[0]).toMatch(/FROM message_outbox\s+WHERE published_at IS NULL/);
+
+    // Throttled: no query within the interval.
+    await refreshMessageOutboxBacklogMetrics(1_000_009_999);
+    expect(writeQuery).toHaveBeenCalledTimes(1);
+
+    // Failure: logged, previous values kept (staleness visible via refreshedAt).
+    writeQuery.mockRejectedValueOnce(new Error("PG down"));
+    await refreshMessageOutboxBacklogMetrics(1_000_010_000);
+    expect(writeQuery).toHaveBeenCalledTimes(2);
+    expect(await gauges()).toEqual({ pending: 3, oldest: 42.5, deadLettered: 2, refreshedAt: 1_000_000 });
   });
 });

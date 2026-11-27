@@ -1,4 +1,9 @@
 import type { Logger } from "pino";
+import {
+  reviewDeliveriesTotal,
+  reviewGenerationDuration,
+  type ReviewDeliveryOutcome,
+} from "../infrastructure/metrics.ts";
 import { retryTierFor, type ReviewRetryTier } from "../messaging/topology.ts";
 import { RagInputError, RagUpstreamError } from "../modules/rag/rag.errors.ts";
 import type { MovieReviewResult } from "../modules/rag/generation/movie-review-generation.service.ts";
@@ -66,19 +71,13 @@ export interface ReviewHandlerDeps {
   settings?: typeof REVIEW_CONSUMER_SETTINGS;
 }
 
-export type ReviewOutcome =
-  | "succeeded"
-  | "superseded"
-  | "duplicate" // job already terminal
-  | "job_missing" // movie (and job) deleted
-  | "invalid_message"
-  | "failed" // permanent generation error
-  | "exhausted" // attempts used up
-  | "retry_scheduled"
-  | "lease_busy"
-  | "lease_lost"
-  | "infrastructure_retry"
-  | "requeued"; // retry publish failed → nack(requeue=true)
+/**
+ * duplicate = job already terminal; job_missing = movie (and job) deleted; failed = permanent
+ * generation error; exhausted = attempts used up; requeued = retry publish failed →
+ * nack(requeue=true). The list lives in metrics.ts (`review_deliveries_total` labels);
+ * `handler_threw` is recorded by the consumer, never returned.
+ */
+export type ReviewOutcome = Exclude<ReviewDeliveryOutcome, "handler_threw">;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -92,7 +91,17 @@ function isPermanent(error: unknown): boolean {
   return false;
 }
 
+/** Handles one delivery and counts its outcome (a throw is counted by the consumer). */
 export async function handleReviewDelivery(
+  delivery: ReviewDelivery,
+  deps: ReviewHandlerDeps,
+): Promise<ReviewOutcome> {
+  const outcome = await processReviewDelivery(delivery, deps);
+  reviewDeliveriesTotal.inc({ outcome });
+  return outcome;
+}
+
+async function processReviewDelivery(
   delivery: ReviewDelivery,
   deps: ReviewHandlerDeps,
 ): Promise<ReviewOutcome> {
@@ -183,12 +192,15 @@ export async function handleReviewDelivery(
 
   try {
     let result: MovieReviewResult;
+    const endGeneration = reviewGenerationDuration.startTimer();
     try {
       result = await deps.generator.generate({
         ...claim.movie,
         signal: AbortSignal.timeout(settings.generationDeadlineMs),
       });
+      endGeneration({ outcome: "ok" });
     } catch (error) {
+      endGeneration({ outcome: "error" });
       return await handleGenerationError(error);
     }
 

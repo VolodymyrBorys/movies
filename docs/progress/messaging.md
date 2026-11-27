@@ -11,7 +11,7 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
 | P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) passed (owner, 2026-11-25) |
 | P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | implemented (2026-11-25, uncommitted): `tsc` 0, unit 384/384, 7 mutation checks caught (assistant); integration incl. broker in vhost `movies_test` green (owner). Review findings fixed 2026-11-27 (2–6 in code, 1 documented as a LAB limitation): unit 388/388, 5 more mutation checks caught (assistant); integration rerun and live run pending (owner) |
-| P5.5 metrics, alerts, dashboard | not started |
+| P5.5 metrics, alerts, dashboard | 5.5a–b (worker `/metrics`, relay + consumer metrics) done 2026-11-27: `tsc` 0, unit 403/403, 7 mutation checks caught (assistant); `metrics-server.test.ts`, `src/routes`, live scrape OK (owner). 5.5c–f not started |
 | P5.6 graceful shutdown | not started |
 | P5.7 exercises | not started |
 
@@ -225,6 +225,35 @@ No blockers (ack/nack order, settle-once per channel, all UPDATEs vs the CHECK c
 6. No unit test for `release`/`fail` throwing after generation (a missing `await` in `return await handleGenerationError` would escape to the fallback unnoticed).
 
 Not verified by the reviewer: `at-least-once` + `x-dead-letter-exchange: ""` on other 4.x versions; duplicates of retry copies under a broker alarm.
+
+## P5.5 — metrics, alerts, dashboard
+
+Plan approved by the owner 2026-11-27 (all points): 5.5a worker `/metrics` → 5.5b app metrics → commit → owner checks the per-queue broker series with `curl` → 5.5c scrape jobs → 5.5d alerts + promtool tests → 5.5e dashboard → 5.5f drills. Decisions: `WORKER_METRICS_PORT` (default 3002); `SERVICE_NAME=movies-api|movies-worker` (enum, default `movies-api`; `npm run worker` sets `movies-worker`) for logs and the metrics `service` label; one shared `metricsRegistry` (the worker also exposes API series at 0 — existing outbox alerts get `job="movies-api"` in 5.5d).
+
+### 5.5a–b (implemented 2026-11-27)
+
+| File | Role |
+|---|---|
+| `src/infrastructure/metrics-server.ts` | `node:http`, `GET /metrics` only (404 otherwise, 500 if collecting fails); `close()` also closes idle keep-alive scrape connections. LAB: no auth, all interfaces. |
+| `src/worker.ts` | `setDefaultLabels({ service })` from `SERVICE_NAME` (warns if not `movies-worker`); metrics server starts **first** (so `up` = process alive while waiting for PG/broker; a taken port → exit 1) and closes **last**. |
+| `src/config/env.ts`, `src/infrastructure/logger.ts`, `package.json` | `SERVICE_NAME`, `WORKER_METRICS_PORT`; logger `service` from config; `worker` script sets `SERVICE_NAME=movies-worker` (`--env-file` doesn't override it). |
+| `src/infrastructure/metrics.ts` | New series, all labelled ones pre-created at 0 (below). |
+
+| Metric | Type | Labels / meaning |
+|---|---|---|
+| `message_outbox_publish_total` | counter | `result`: `published \| returned \| publish_failed \| timeout` (broker answer per claimed row) |
+| `message_outbox_events_total` | counter | `result`: `published` (confirmed and marked) `\| retry_scheduled \| dead_lettered \| lease_lost \| db_error` |
+| `message_outbox_pending_messages`, `message_outbox_oldest_pending_age_seconds`, `message_outbox_dead_lettered_messages`, `message_outbox_backlog_last_refresh_timestamp_seconds` | gauges | sampled every 10 s by the relay loop (also while the broker is down), one query; dead-lettered = state that survives restarts (finding 1, relay path). LAB: sequential scan of `message_outbox` (published rows never deleted), not measured |
+| `review_deliveries_total` | counter | `outcome`: the 12 `ReviewOutcome` values + `handler_threw` (consumer bug path) |
+| `review_generation_duration_seconds` | histogram | `outcome`: `ok \| error`; generator call incl. in-process retries, buckets to 90 s (covers the fake generator, which bypasses `rag_stage_duration_seconds`) |
+
+Verification (assistant, 2026-11-27): `npx tsc -p .` 0; unit 403/403 (excluding `src/routes` and `metrics-server.test.ts`, both need local port binding). Mutation checks, all caught and restored: unmarked confirmed rows not counted as `lease_lost` (1), handler outcome not counted (4), generation error observed as `ok` (1), backlog refresh not throttled (1), `handler_threw` not counted (1), event series not pre-created (1; first version of that test passed because earlier tests had created the series → now checks a fresh module), `db_error` not counted (1).
+Owner (2026-11-27, passed): `metrics-server.test.ts` + `src/routes`; live `npm run worker` → `localhost:3002/metrics` shows all new series pre-created at 0 with `service="movies-worker"`, backlog refresh timestamp set. Broker `/metrics/detailed` (`queue_coarse_metrics`) confirmed: `rabbitmq_detailed_queue_messages{,_ready,_unacked}{vhost="/",queue=…}` for all 6 review queues; aggregated `/metrics` has `rabbitmq_global_messages_dead_lettered_{maxlen,rejected}_total{queue_type,dead_letter_strategy}`. Not yet seen (output cut by `head`): `rabbitmq_detailed_queue_consumers`, `rabbitmq_global_messages_{redelivered,confirmed,received}_total`.
+Commands used:
+```
+curl -s 'localhost:15692/metrics/detailed?vhost=/&family=queue_coarse_metrics&family=queue_consumer_count' | grep -E 'reviews\.generate' | head -20
+curl -s localhost:15692/metrics | grep -E '^rabbitmq_global_messages_(redelivered|dead_lettered|confirmed|received)' | head
+```
 
 ## Setup (owner, Homebrew)
 

@@ -2,6 +2,8 @@ import { EventEmitter } from "node:events";
 import type { ChannelModel, ConsumeMessage, Options } from "amqplib";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reviewDeliveriesTotal } from "../infrastructure/metrics.ts";
+import { metricValue } from "../test/metric-value.ts";
 import type { ReviewDelivery } from "../workers/review-handler.ts";
 import { ReviewConsumer } from "./review-consumer.ts";
 import { REVIEW_RETRY_TIERS, REVIEWS_QUEUE } from "./topology.ts";
@@ -199,6 +201,19 @@ describe("ReviewConsumer", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(channel.nacked.map((n) => n.requeue)).toEqual([true]);
     expect(consumer.inFlightCount()).toBe(0);
+  });
+
+  it("counts a throwing handler as handler_threw", async () => {
+    const before = await metricValue(reviewDeliveriesTotal, { outcome: "handler_threw" });
+    const handler = vi.fn(async () => {
+      throw new Error("bug");
+    });
+    const { channel } = await openConsumer(handler);
+
+    channel.deliver();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(await metricValue(reviewDeliveriesTotal, { outcome: "handler_threw" })).toBe(before + 1);
   });
 
   describe("start (recovery setup shared with the outbox relay)", () => {

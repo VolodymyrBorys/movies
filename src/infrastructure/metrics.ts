@@ -77,6 +77,111 @@ for (const result of [
   outboxEventsTotal.inc({ result }, 0);
 }
 
+// --- Worker process (P5.5): message_outbox relay and review consumer ---------
+// Recorded only in the worker (service="movies-worker"); the API exposes them at 0.
+// Value lists mirror src/workers/outbox-relay.ts and src/workers/review-handler.ts (kept
+// literal here so infrastructure doesn't import workers; those files type-check against them).
+
+export const MESSAGE_OUTBOX_PUBLISH_RESULTS = [
+  "published",
+  "returned",
+  "publish_failed",
+  "timeout",
+] as const;
+export type MessageOutboxPublishResult = (typeof MESSAGE_OUTBOX_PUBLISH_RESULTS)[number];
+
+/** Broker answer per publish attempt (one claimed row = one attempt). */
+export const messageOutboxPublishTotal = new Counter({
+  name: "message_outbox_publish_total",
+  help: "Outbox relay publish attempts by broker result",
+  labelNames: ["result"] as const,
+  registers: [metricsRegistry],
+});
+
+export const MESSAGE_OUTBOX_EVENT_RESULTS = [
+  "published", // confirmed AND marked published
+  "retry_scheduled",
+  "dead_lettered",
+  "lease_lost", // guarded UPDATE matched no row (incl. confirmed but not marked)
+  "db_error", // mark/reschedule UPDATE failed; the lease expires and the row is retried
+] as const;
+export type MessageOutboxEventResult = (typeof MESSAGE_OUTBOX_EVENT_RESULTS)[number];
+
+/** What the relay recorded in PostgreSQL per claimed row. Alert on increase(). */
+export const messageOutboxEventsTotal = new Counter({
+  name: "message_outbox_events_total",
+  help: "Outbox relay outcome per claimed message, by result",
+  labelNames: ["result"] as const,
+  registers: [metricsRegistry],
+});
+
+export const messageOutboxPendingMessages = new Gauge({
+  name: "message_outbox_pending_messages",
+  help: "message_outbox rows not yet published or dead-lettered (sampled by the relay)",
+  registers: [metricsRegistry],
+});
+
+export const messageOutboxOldestPendingAge = new Gauge({
+  name: "message_outbox_oldest_pending_age_seconds",
+  help: "Age of the oldest pending message_outbox row since created_at (sampled by the relay)",
+  registers: [metricsRegistry],
+});
+
+/** State, not a counter: survives restarts and stays > 0 until an operator re-queues. */
+export const messageOutboxDeadLetteredMessages = new Gauge({
+  name: "message_outbox_dead_lettered_messages",
+  help: "message_outbox rows dead-lettered by the relay and never published (sampled)",
+  registers: [metricsRegistry],
+});
+
+export const messageOutboxBacklogRefreshedAt = new Gauge({
+  name: "message_outbox_backlog_last_refresh_timestamp_seconds",
+  help: "Unix time of the last successful message_outbox backlog sample",
+  registers: [metricsRegistry],
+});
+
+export const REVIEW_DELIVERY_OUTCOMES = [
+  "succeeded",
+  "superseded",
+  "duplicate",
+  "job_missing",
+  "invalid_message",
+  "failed",
+  "exhausted",
+  "retry_scheduled",
+  "lease_busy",
+  "lease_lost",
+  "infrastructure_retry",
+  "requeued",
+  "handler_threw", // bug path in the consumer: requeued after a pause
+] as const;
+export type ReviewDeliveryOutcome = (typeof REVIEW_DELIVERY_OUTCOMES)[number];
+
+export const reviewDeliveriesTotal = new Counter({
+  name: "review_deliveries_total",
+  help: "review.requested deliveries handled by the review consumer, by outcome",
+  labelNames: ["outcome"] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Wall time of one generator call (incl. its in-process retries), for stub, fake and real
+ * Gemini alike — the fake generator bypasses rag_stage_duration_seconds.
+ */
+export const reviewGenerationDuration = new Histogram({
+  name: "review_generation_duration_seconds",
+  help: "Review generator call duration by outcome",
+  labelNames: ["outcome"] as const,
+  // Up to the 90 s generation deadline.
+  buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 90],
+  registers: [metricsRegistry],
+});
+
+for (const result of MESSAGE_OUTBOX_PUBLISH_RESULTS) messageOutboxPublishTotal.inc({ result }, 0);
+for (const result of MESSAGE_OUTBOX_EVENT_RESULTS) messageOutboxEventsTotal.inc({ result }, 0);
+for (const outcome of REVIEW_DELIVERY_OUTCOMES) reviewDeliveriesTotal.inc({ outcome }, 0);
+for (const outcome of ["ok", "error"] as const) reviewGenerationDuration.zero({ outcome });
+
 // --- RAG -------------------------------------------------------------------
 // Stage values mirror RagStage in src/modules/rag/rag.errors.ts (kept literal here so
 // infrastructure doesn't import modules).

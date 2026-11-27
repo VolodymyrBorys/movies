@@ -1,5 +1,9 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { runOutboxRelayBatch, type RelayChannel } from "./outbox-relay.ts";
+import {
+  refreshMessageOutboxBacklogMetrics,
+  runOutboxRelayBatch,
+  type RelayChannel,
+} from "./outbox-relay.ts";
 import { logger as rootLogger } from "../infrastructure/logger.ts";
 
 const logger = rootLogger.child({ component: "outbox-relay" });
@@ -11,6 +15,9 @@ let runnerPromise: Promise<void> | null = null;
 
 async function runLoop(getChannel: () => RelayChannel | null): Promise<void> {
   while (!stopping) {
+    // Throttled internally (10 s) and never throws; runs even without a channel.
+    await refreshMessageOutboxBacklogMetrics();
+
     try {
       // Channel read per batch: after a reconnect the holder has a new one.
       const count = await runOutboxRelayBatch(getChannel());

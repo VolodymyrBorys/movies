@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ChannelModel, ConfirmChannel, ConsumeMessage, Message } from "amqplib";
 import type { Logger } from "pino";
+import { reviewDeliveriesTotal } from "../infrastructure/metrics.ts";
 import { REVIEW_CONSUMER_SETTINGS, type ReviewDelivery } from "../workers/review-handler.ts";
 import {
   assertReviewConsumerTopology,
@@ -161,6 +162,7 @@ export class ReviewConsumer {
         // message isn't stuck unacked until the channel closes — after a pause: an explicit
         // requeue isn't counted by the delivery-limit, so a deterministic bug would otherwise
         // be a hot redelivery loop. (No-op if the handler settled before throwing.)
+        reviewDeliveriesTotal.inc({ outcome: "handler_threw" });
         this.logger.error(
           { err: error, messageId: delivery.messageId, delayMs: this.requeueDelayMs },
           "Review handler threw; message requeued after a pause",

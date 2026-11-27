@@ -42,6 +42,30 @@ describe("loadConfig", () => {
     });
   });
 
+  it("service name defaults to movies-api; worker metrics port to 3002", () => {
+    const config = loadConfig({ ...required });
+
+    expect(config.serviceName).toBe("movies-api");
+    expect(config.worker).toEqual({ metricsPort: 3002 });
+  });
+
+  it("reads SERVICE_NAME and WORKER_METRICS_PORT", () => {
+    const config = loadConfig({
+      ...required,
+      SERVICE_NAME: "movies-worker",
+      WORKER_METRICS_PORT: "9500",
+    });
+
+    expect(config.serviceName).toBe("movies-worker");
+    expect(config.worker.metricsPort).toBe(9500);
+  });
+
+  it("rejects an unknown SERVICE_NAME (it becomes a metric label)", () => {
+    expect(() => loadConfig({ ...required, SERVICE_NAME: "anything-else" })).toThrow(
+      /SERVICE_NAME/,
+    );
+  });
+
   it("returns a frozen config", () => {
     const config = loadConfig({ ...required });
     expect(Object.isFrozen(config)).toBe(true);

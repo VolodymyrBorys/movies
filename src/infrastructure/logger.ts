@@ -5,7 +5,7 @@ import { config } from "../config/env.ts";
 export const logger = pino({
   level: config.log.level,
   base: {
-    service: "movies-api",
+    service: config.serviceName,
     environment: config.nodeEnv,
   },
   redact: {

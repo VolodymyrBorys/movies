@@ -1,6 +1,12 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
+import {
+  REVIEW_DELIVERY_OUTCOMES,
+  reviewDeliveriesTotal,
+  reviewGenerationDuration,
+} from "../infrastructure/metrics.ts";
 import { REVIEW_RETRY_TIERS, type ReviewRetryTier } from "../messaging/topology.ts";
+import { metricValue } from "../test/metric-value.ts";
 import { RagInputError, RagUpstreamError } from "../modules/rag/rag.errors.ts";
 import type { ReviewGenerator } from "../modules/reviews/review-generator.ts";
 import type {
@@ -298,6 +304,44 @@ describe("handleReviewDelivery", () => {
       expect(actions).toEqual([`retry:${tier10s?.queue}`, "ack"]);
     },
   );
+
+  describe("metrics", () => {
+    const delivered = (outcome: string) => metricValue(reviewDeliveriesTotal, { outcome });
+    const generations = (outcome: "ok" | "error") =>
+      metricValue(reviewGenerationDuration, { outcome }, "_count");
+
+    it("pre-creates every outcome series at 0", async () => {
+      const text = await reviewDeliveriesTotal.get();
+      expect(text.values.map((v) => v.labels.outcome).sort()).toEqual(
+        [...REVIEW_DELIVERY_OUTCOMES].sort(),
+      );
+    });
+
+    it.each([
+      ["succeeded", {}],
+      ["retry_scheduled", { generate: new Error("503") }],
+      ["duplicate", { claim: { kind: "terminal", status: "succeeded" } }],
+      ["infrastructure_retry", { claim: new Error("ECONNREFUSED") }],
+    ] as const)("counts one %s delivery", async (outcome, options) => {
+      const before = await delivered(outcome);
+
+      const result = await setup(options).run();
+
+      expect(result.outcome).toBe(outcome);
+      expect(await delivered(outcome)).toBe(before + 1);
+    });
+
+    it("observes the generation duration by ok/error, and only when the generator ran", async () => {
+      const [ok, error] = [await generations("ok"), await generations("error")];
+
+      await setup().run();
+      await setup({ generate: new Error("503") }).run();
+      await setup({ claim: { kind: "missing" } }).run();
+
+      expect(await generations("ok")).toBe(ok + 1);
+      expect(await generations("error")).toBe(error + 1);
+    });
+  });
 
   it("requeues (and does not ack) only after a pause when the retry copy is not confirmed", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout"] });
