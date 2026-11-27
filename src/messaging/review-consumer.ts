@@ -20,13 +20,32 @@ import {
 // a new one (406 PRECONDITION_FAILED "unknown delivery tag" closes it). Every delivery is
 // therefore bound to the channel it arrived on, and settles at most once.
 //
-// LAB: simplified shutdown — close() closes the channel; in-flight handlers are not awaited
-// and their unacked messages are redelivered (draining is P5.6).
+// Graceful shutdown (P5.6): drain() cancels the consumer (no new deliveries) but keeps the
+// channel open, because in-flight handlers still ack / publish retries on it; waits for them;
+// on timeout calls `abortInFlight` (the worker aborts the generations) and waits a short grace;
+// then closes the channel. Deliveries still unsettled at close are redelivered by the broker.
 
 export const REVIEW_CONSUMER_REOPEN_DELAY_MS = 5_000;
 export const RETRY_PUBLISH_TIMEOUT_MS = 10_000;
 
 export type ReviewDeliveryHandler = (delivery: ReviewDelivery) => Promise<unknown>;
+
+export interface DrainOptions {
+  timeoutMs: number;
+  /** Called once when `timeoutMs` passes with deliveries still in flight. */
+  abortInFlight: () => void;
+  /** Wait after `abortInFlight` before closing the channel. */
+  abortGraceMs: number;
+}
+
+export interface DrainResult {
+  /** In flight when the consumer was cancelled. */
+  inFlightAtStart: number;
+  /** `abortInFlight` was called. */
+  aborted: boolean;
+  /** Still in flight when the channel was closed (redelivered by the broker). */
+  inFlightAtClose: number;
+}
 
 export interface ReviewConsumerOptions {
   prefetch: number;
@@ -42,7 +61,10 @@ export class ReviewConsumer {
   private model: ChannelModel | null = null;
   private reopenTimer: NodeJS.Timeout | null = null;
   private closing = false;
+  private consumerTag: string | null = null;
+  private drainPromise: Promise<DrainResult> | null = null;
   private inFlight = 0;
+  private idleWaiters: (() => void)[] = [];
   private readonly handler: ReviewDeliveryHandler;
   private readonly logger: Logger;
   private readonly prefetch: number;
@@ -109,15 +131,19 @@ export class ReviewConsumer {
       channel.on("close", () => {
         if (this.channel !== channel) return;
         this.channel = null;
+        this.consumerTag = null;
         this.logger.warn("Review consumer channel closed");
         this.scheduleReopen(model);
       });
       this.channel = channel;
       this.clearReopenTimer();
 
-      await channel.consume(REVIEWS_QUEUE, (message) => this.onMessage(channel, message), {
-        noAck: false,
-      });
+      const { consumerTag } = await channel.consume(
+        REVIEWS_QUEUE,
+        (message) => this.onMessage(channel, message),
+        { noAck: false },
+      );
+      if (this.channel === channel) this.consumerTag = consumerTag;
     } catch (error) {
       // Half-opened channel: detach it first so its close doesn't schedule a second reopen;
       // the caller (recovery setup or start()/scheduleReopen) decides how to retry.
@@ -128,6 +154,69 @@ export class ReviewConsumer {
     this.logger.info({ queue: REVIEWS_QUEUE, prefetch: this.prefetch }, "Review consumer started");
   }
 
+  /**
+   * Graceful stop (see the header). Idempotent: a second call returns the first one's result.
+   * Never rejects; a broker failure on the way only means the broker redelivers more.
+   */
+  drain(options: DrainOptions): Promise<DrainResult> {
+    this.drainPromise ??= this.runDrain(options);
+    return this.drainPromise;
+  }
+
+  private async runDrain(options: DrainOptions): Promise<DrainResult> {
+    // No reopen from here on: a channel closing during the drain stays closed.
+    this.closing = true;
+    this.clearReopenTimer();
+
+    const channel = this.channel;
+    const consumerTag = this.consumerTag;
+    if (channel !== null && consumerTag !== null) {
+      try {
+        // After cancel-ok the broker sends no more deliveries; those already sent are in
+        // flight (prefetch window) and settle on this still-open channel.
+        await channel.cancel(consumerTag);
+      } catch (error) {
+        this.logger.warn({ err: error }, "Review consumer cancel failed");
+      }
+    }
+
+    const inFlightAtStart = this.inFlight;
+    this.logger.info({ inFlight: inFlightAtStart }, "Review consumer draining");
+
+    let aborted = false;
+    if (!(await this.waitForIdle(options.timeoutMs))) {
+      aborted = true;
+      this.logger.warn(
+        { inFlight: this.inFlight, timeoutMs: options.timeoutMs },
+        "Review consumer drain timed out; aborting in-flight generations",
+      );
+      options.abortInFlight();
+      await this.waitForIdle(options.abortGraceMs);
+    }
+
+    const inFlightAtClose = this.inFlight;
+    await this.close();
+    this.logger.info({ inFlightAtStart, aborted, inFlightAtClose }, "Review consumer drained");
+    return { inFlightAtStart, aborted, inFlightAtClose };
+  }
+
+  /** true when nothing is in flight within `timeoutMs`. */
+  private waitForIdle(timeoutMs: number): Promise<boolean> {
+    if (this.inFlight === 0) return Promise.resolve(true);
+
+    return new Promise<boolean>((resolve) => {
+      const onIdle = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        this.idleWaiters = this.idleWaiters.filter((waiter) => waiter !== onIdle);
+        resolve(false);
+      }, timeoutMs);
+      this.idleWaiters.push(onIdle);
+    });
+  }
+
   /** Stops consuming by closing the channel (unacked deliveries go back to the queue). */
   async close(): Promise<void> {
     this.closing = true;
@@ -135,6 +224,7 @@ export class ReviewConsumer {
 
     const channel = this.channel;
     this.channel = null;
+    this.consumerTag = null;
     if (channel === null) return;
 
     try {
@@ -172,6 +262,11 @@ export class ReviewConsumer {
       })
       .finally(() => {
         this.inFlight--;
+        if (this.inFlight === 0) {
+          const waiters = this.idleWaiters;
+          this.idleWaiters = [];
+          for (const waiter of waiters) waiter();
+        }
       });
   }
 

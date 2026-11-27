@@ -47,6 +47,13 @@ export const REVIEW_CONSUMER_SETTINGS = Object.freeze({
    * failing, the message cycles every few seconds until one of them recovers.
    */
   requeueDelayMs: 5_000,
+  /**
+   * Graceful shutdown (P5.6): wait this long for in-flight deliveries after cancelling the
+   * consumer, then abort the generations still running (fits a 30 s termination grace).
+   */
+  drainTimeoutMs: 25_000,
+  /** After the abort: time for the aborted handlers to release their jobs and settle. */
+  drainAbortGraceMs: 5_000,
 });
 
 /** One broker delivery, bound to the channel it arrived on. */
@@ -69,6 +76,11 @@ export interface ReviewHandlerDeps {
   workerId: string;
   logger: Logger;
   settings?: typeof REVIEW_CONSUMER_SETTINGS;
+  /**
+   * Aborted by the worker when the shutdown drain times out (P5.6). A generation that fails
+   * after it fired is released with its attempt refunded and requeued, not retried.
+   */
+  shutdownSignal?: AbortSignal;
 }
 
 /**
@@ -194,13 +206,21 @@ async function processReviewDelivery(
     let result: MovieReviewResult;
     const endGeneration = reviewGenerationDuration.startTimer();
     try {
+      const deadline = AbortSignal.timeout(settings.generationDeadlineMs);
       result = await deps.generator.generate({
         ...claim.movie,
-        signal: AbortSignal.timeout(settings.generationDeadlineMs),
+        signal:
+          deps.shutdownSignal === undefined
+            ? deadline
+            : AbortSignal.any([deadline, deps.shutdownSignal]),
       });
       endGeneration({ outcome: "ok" });
     } catch (error) {
       endGeneration({ outcome: "error" });
+      // Any failure after the shutdown abort counts as the abort: the generator may surface
+      // it as its own error type. LAB: simplified — a real failure racing the abort is
+      // refunded too.
+      if (deps.shutdownSignal?.aborted === true) return await releaseForShutdown(error);
       return await handleGenerationError(error);
     }
 
@@ -222,6 +242,25 @@ async function processReviewDelivery(
       attempts,
       err: error,
     });
+  }
+
+  /**
+   * Shutdown abort: job back to `queued` without spending the attempt, message requeued
+   * (no delay needed; an explicit requeue isn't counted by the delivery-limit). If the
+   * channel is already closed, the requeue is a no-op and the broker redelivers anyway.
+   */
+  async function releaseForShutdown(error: unknown): Promise<ReviewOutcome> {
+    if (!(await deps.jobs.releaseForShutdown(jobId, leaseToken))) {
+      delivery.ack();
+      log.warn({ attempts, result: "lease_lost" }, "Shutdown release not recorded: lease lost");
+      return "lease_lost";
+    }
+    delivery.requeue();
+    log.warn(
+      { attempts, err: error, result: "shutdown_released" },
+      "Review generation aborted by shutdown; job released, message requeued",
+    );
+    return "shutdown_released";
   }
 
   async function handleGenerationError(error: unknown): Promise<ReviewOutcome> {

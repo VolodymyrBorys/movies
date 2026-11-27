@@ -153,6 +153,7 @@ export const REVIEW_DELIVERY_OUTCOMES = [
   "lease_lost",
   "infrastructure_retry",
   "requeued",
+  "shutdown_released", // generation aborted by a graceful shutdown: attempt refunded, requeued
   "handler_threw", // bug path in the consumer: requeued after a pause
 ] as const;
 export type ReviewDeliveryOutcome = (typeof REVIEW_DELIVERY_OUTCOMES)[number];

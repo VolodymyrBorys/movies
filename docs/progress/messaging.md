@@ -11,8 +11,8 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
 | P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) passed (owner, 2026-11-25) |
 | P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | implemented (2026-11-25, uncommitted): `tsc` 0, unit 384/384, 7 mutation checks caught (assistant); integration incl. broker in vhost `movies_test` green (owner). Review findings fixed 2026-11-27 (2–6 in code, 1 documented as a LAB limitation): unit 388/388, 5 more mutation checks caught (assistant); integration rerun and live run pending (owner) |
-| P5.5 metrics, alerts, dashboard | 5.5a–b (worker `/metrics`, relay + consumer metrics) done 2026-11-27 (`d460ca0`): `tsc` 0, unit 403/403, 7 mutation checks caught (assistant); `metrics-server.test.ts`, `src/routes`, live scrape OK (owner). 5.5c–e (scrape jobs, 8 alerts, dashboard) done 2026-11-27: promtool check + tests green, 5 rule mutations caught (assistant); targets scraped, consumers series confirmed (owner). Drills (5.5f) pending |
-| P5.6 graceful shutdown | not started |
+| P5.5 metrics, alerts, dashboard | 5.5a–b (worker `/metrics`, relay + consumer metrics) done 2026-11-27 (`d460ca0`): `tsc` 0, unit 403/403, 7 mutation checks caught (assistant); `metrics-server.test.ts`, `src/routes`, live scrape OK (owner). 5.5c–e (scrape jobs, 8 alerts, dashboard) done 2026-11-27: promtool check + tests green, 5 rule mutations caught (assistant); targets scraped, consumers series confirmed (owner). Drills (5.5f) skipped by the owner 2026-11-27: alerts never fired live, dashboard not rendered, P5.4 live run not done — unverified |
+| P5.6 graceful shutdown | done 2026-11-27: `tsc` 0, unit 418/418, 9 mutation checks caught (assistant); `npm run test:integration` green incl. `releaseForShutdown` (owner); live SIGTERM exercise not run (unverified) |
 | P5.7 exercises | not started |
 
 ## P5.0 — what exists
@@ -275,7 +275,48 @@ curl -s localhost:15692/metrics | grep -E '^rabbitmq_global_messages_(redelivere
 - Dashboard `observability/grafana/dashboards/movies-worker.json` ("Movies Worker (P5)", 18 panels): health stats (worker up, consumers, DLQ, relay dead letters), ready/unacked per review queue, deliveries by outcome, generation p50/p95, relay publish results / recorded outcomes / backlog, broker dead-letter rates by reason and redeliveries.
 
 Verification (assistant, 2026-11-27): `promtool check config` OK; `promtool check rules` 19 + 17 rules; `promtool test rules tests/*.test.yml` green (14 new test cases). Rule mutations, all caught and restored: no `job` filter on `OutboxBacklogStale` / `MessageOutboxBacklogStale`, no `up == 1` guard in `ReviewConsumersMissing`, no `absent()` branch, DLQ alert matching every queue. Not caught by design: no `job` filter on `MessageOutboxBacklogTooOld` (a `max()` over the other job's 0 changes nothing). Dashboard: all 18 PromQL expressions parse (`promtool check rules` on a scratch file); not rendered in Grafana.
-Owner (2026-11-27): Prometheus picked up the new targets; `rabbitmq_detailed_queue_consumers{vhost="/",queue="reviews.generate"} 1` with the worker running (all 6 review queues listed). Still unverified: `rabbitmq_global_messages_redelivered_total`, `rabbitmq_global_messages_dead_lettered_{delivery_limit,expired}_total` (dashboard only); dashboard not yet looked at in Grafana; no alert fired live yet (5.5f).
+Owner (2026-11-27): Prometheus picked up the new targets; `rabbitmq_detailed_queue_consumers{vhost="/",queue="reviews.generate"} 1` with the worker running (all 6 review queues listed). Still unverified: `rabbitmq_global_messages_redelivered_total`, `rabbitmq_global_messages_dead_lettered_{delivery_limit,expired}_total` (dashboard only); dashboard not yet looked at in Grafana; no alert fired live yet. 5.5f drills skipped by the owner 2026-11-27 (stays unverified; drill steps: `docs/session-log.md` history / P5.7 exercises cover the DLQ case).
+
+## P5.6 — graceful shutdown
+
+Plan approved by the owner 2026-11-27: drain timeout a constant (25 s, not env); an attempt aborted by shutdown is refunded; message after the abort → `nack(requeue=true)`; one commit.
+
+Before: `reviewConsumer.close()` closed the channel at once — in-flight generations were not awaited, their jobs stayed `running` under a 120 s lease, the redelivery went `lease_busy` → retry queues until the lease expired, then the takeover spent another attempt (and paid for the generation twice). The 15 s force-exit was shorter than the 90 s generation deadline anyway.
+
+Shutdown sequence (`src/worker.ts`):
+1. `ReviewConsumer.drain()` and `stopOutboxRelay()` in parallel (independent channels).
+   - `basic.cancel(consumerTag)`: no new deliveries; the channel stays open, because delivery tags are per channel and in-flight handlers still ack / publish retry copies on it. No reopen from here on.
+   - Wait until `inFlight` = 0, up to `drainTimeoutMs` (25 s, `REVIEW_CONSUMER_SETTINGS`).
+   - Timeout → `abortInFlight()` = the worker's shutdown `AbortController.abort()`; the handler combines it with the generation deadline (`AbortSignal.any`). A generation that fails after the abort → `releaseForShutdown` (job `queued`, lease cleared, `attempts - 1`, `last_error` kept) → `requeue()` → outcome `shutdown_released`. Wait `drainAbortGraceMs` (5 s), then close the channel; anything still unsettled is redelivered by the broker.
+2. Publish channel → connection → PG → `/metrics` (last). Force exit after drain + grace + 10 s = 40 s.
+
+| Case | Result |
+|---|---|
+| Generation finishes within 25 s | acked normally (`succeeded` / retry copy), no redelivery |
+| Generation still running at 25 s | aborted → `shutdown_released`, attempt refunded, requeued at once (another worker or the next start) |
+| Generation succeeds although the abort fired | stored normally (`succeeded`) |
+| `releaseForShutdown` finds the lease lost | ack, `lease_lost` |
+| PostgreSQL down at the release | `infrastructure_retry` (retry copy); the job stays `running` → lease takeover later, attempt spent |
+| Broker gone during the drain | acks fail (logged), broker redelivers; handlers idempotent |
+| SIGKILL / force exit / second Ctrl+C ignored | old behavior: lease expiry → takeover, attempt spent |
+
+LAB simplifications: any generator error after the abort counts as the abort (a real failure racing it is refunded too); the refund is unconditional, so a job aborted by shutdowns forever never exhausts; the abort still wastes the billable call already in progress (only a drain timeout > 90 s would avoid it, at the cost of slow deploys); the in-process 3× generator retries inside one attempt are not interrupted except through the signal.
+
+Verification (assistant, 2026-11-27): `npx tsc -p .` 0; unit 418/418 (excl. `src/routes`, `metrics-server.test.ts`): +8 consumer drain tests (cancel before close, waits for in-flight on the open channel, timeout → abort once → grace → close, close despite a hung handler, idempotent, no reopen when the channel closes mid-drain, cancel failure, never opened), +7 handler tests (signal combined, release + requeue + no retry copy, last attempt, success despite abort, no-abort error stays a retry, lease lost, PG down). Mutation checks, all caught and restored: no cancel, no wait, no abort, idle waiters not notified, no grace, signal not combined, no shutdown branch, ack instead of requeue, drain not idempotent. Not covered by tests: `src/worker.ts` wiring (order, `Promise.all`, force-exit timer).
+Owner (2026-11-27): `npm run test:integration` green (incl. 2 new `releaseForShutdown` tests). Live exercise below not run yet (unverified).
+
+Live exercise (owner):
+```
+# A: finishes within the drain
+REVIEW_GENERATOR=fake REVIEW_FAKE_LATENCY_MS=10000 npm run worker
+#    POST /v1/movies/<id>/review, then within ~5 s Ctrl+C
+#    expected: "Review consumer draining" inFlight 1 → "Review generated" → "Review consumer drained" aborted false; job succeeded
+# B: aborted by the drain timeout
+REVIEW_GENERATOR=fake REVIEW_FAKE_LATENCY_MS=60000 npm run worker
+#    POST for another movie, Ctrl+C after ~3 s
+#    expected after ~25 s: "drain timed out" → result shutdown_released → "drained" aborted true; job queued, attempts 0
+#    restart (stub): job succeeded with attempts 1
+```
 
 ## Setup (owner, Homebrew)
 

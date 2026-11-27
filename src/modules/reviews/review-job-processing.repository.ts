@@ -228,6 +228,29 @@ class ReviewJobProcessingRepository {
     return rowCount === 1;
   }
 
+  /**
+   * Back to `queued` after a graceful-shutdown abort (P5.6), refunding the attempt counted at
+   * claim: a deploy is not a generation failure. `last_error` is kept. `false`: lease lost.
+   * LAB: simplified — the refund trusts the caller; a crash (no refund) is indistinguishable
+   * in the row from a shutdown, and repeated aborted shutdowns never exhaust the job.
+   */
+  async releaseForShutdown(jobId: string, leaseToken: string): Promise<boolean> {
+    const { rowCount } = await PG.writeQuery(
+      `
+        UPDATE review_jobs
+        SET status = 'queued',
+            locked_by = NULL,
+            locked_until = NULL,
+            attempts = GREATEST(attempts - 1, 0)
+        WHERE id = $1
+          AND locked_by = $2
+          AND status = 'running'
+      `,
+      [jobId, leaseToken],
+    );
+    return rowCount === 1;
+  }
+
   /** Terminal failure. `false`: lease lost. */
   async fail(jobId: string, leaseToken: string, error: string): Promise<boolean> {
     const { rowCount } = await PG.writeQuery(
@@ -250,7 +273,7 @@ class ReviewJobProcessingRepository {
 
 export type ReviewJobProcessing = Pick<
   ReviewJobProcessingRepository,
-  "claim" | "complete" | "release" | "fail"
+  "claim" | "complete" | "release" | "releaseForShutdown" | "fail"
 >;
 
 export const reviewJobProcessingRepository = new ReviewJobProcessingRepository();

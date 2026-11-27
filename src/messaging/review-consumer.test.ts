@@ -28,6 +28,7 @@ class FakeChannel extends EventEmitter {
     this.onMessage = onMessage;
     return { consumerTag: "ctag" };
   });
+  cancel = vi.fn(async (_consumerTag: string) => ({}));
   close = vi.fn(async () => {
     this.closed = true;
     this.emit("close");
@@ -345,5 +346,153 @@ describe("ReviewConsumer", () => {
     await vi.advanceTimersByTimeAsync(REOPEN_MS);
 
     expect(model.channels).toHaveLength(1);
+  });
+
+  describe("drain (graceful shutdown, P5.6)", () => {
+    const TIMEOUT_MS = 1_000;
+    const GRACE_MS = 200;
+
+    /** Handler whose deliveries finish only when the test says so. */
+    function controlledHandler() {
+      const deliveries: ReviewDelivery[] = [];
+      const finishers: (() => void)[] = [];
+      const handler = vi.fn(
+        (delivery: ReviewDelivery) =>
+          new Promise<void>((resolve) => {
+            deliveries.push(delivery);
+            finishers.push(resolve);
+          }),
+      );
+      const finish = (index: number) => finishers[index]?.();
+      return { handler, deliveries, finish };
+    }
+
+    function drainOptions() {
+      const abortInFlight = vi.fn();
+      return {
+        abortInFlight,
+        options: { timeoutMs: TIMEOUT_MS, abortGraceMs: GRACE_MS, abortInFlight },
+      };
+    }
+
+    it("with nothing in flight: cancels the consumer, then closes, no abort", async () => {
+      const { consumer, channel } = await openConsumer();
+      const { abortInFlight, options } = drainOptions();
+
+      const result = await consumer.drain(options);
+
+      expect(channel.cancel).toHaveBeenCalledWith("ctag");
+      expect(channel.cancel.mock.invocationCallOrder[0]).toBeLessThan(
+        channel.close.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(abortInFlight).not.toHaveBeenCalled();
+      expect(result).toEqual({ inFlightAtStart: 0, aborted: false, inFlightAtClose: 0 });
+    });
+
+    it("keeps the channel open until in-flight deliveries settle on it", async () => {
+      const { handler, deliveries, finish } = controlledHandler();
+      const { consumer, channel } = await openConsumer(handler);
+      const { abortInFlight, options } = drainOptions();
+      const message = channel.deliver();
+
+      const pending = consumer.drain(options);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 1);
+      expect(channel.close).not.toHaveBeenCalled();
+
+      deliveries[0]?.ack();
+      finish(0);
+      const result = await pending;
+
+      expect(channel.acked).toEqual([message]);
+      expect(channel.close).toHaveBeenCalledOnce();
+      expect(abortInFlight).not.toHaveBeenCalled();
+      expect(result).toEqual({ inFlightAtStart: 1, aborted: false, inFlightAtClose: 0 });
+    });
+
+    it("on timeout: aborts once, waits the grace for the aborted handlers, then closes", async () => {
+      const { handler, deliveries, finish } = controlledHandler();
+      const { consumer, channel } = await openConsumer(handler);
+      const { abortInFlight, options } = drainOptions();
+      channel.deliver("msg-1");
+      channel.deliver("msg-2");
+      abortInFlight.mockImplementation(() => {
+        // Aborted handlers release their jobs and requeue (P5.6 handler path).
+        deliveries.forEach((delivery) => delivery.requeue());
+        finish(0);
+        finish(1);
+      });
+
+      const pending = consumer.drain(options);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+      const result = await pending;
+
+      expect(abortInFlight).toHaveBeenCalledOnce();
+      expect(channel.nacked.map((n) => n.requeue)).toEqual([true, true]);
+      expect(result).toEqual({ inFlightAtStart: 2, aborted: true, inFlightAtClose: 0 });
+    });
+
+    it("closes after timeout + grace even if a handler never finishes (broker redelivers)", async () => {
+      const { handler } = controlledHandler();
+      const { consumer, channel } = await openConsumer(handler);
+      const { options } = drainOptions();
+      channel.deliver();
+
+      const pending = consumer.drain(options);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS + GRACE_MS - 1);
+      expect(channel.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+
+      expect(channel.close).toHaveBeenCalledOnce();
+      expect(result).toEqual({ inFlightAtStart: 1, aborted: true, inFlightAtClose: 1 });
+    });
+
+    it("is idempotent: a second call shares the first drain", async () => {
+      const { consumer, channel } = await openConsumer();
+      const { options } = drainOptions();
+
+      const [first, second] = await Promise.all([consumer.drain(options), consumer.drain(options)]);
+
+      expect(second).toBe(first);
+      expect(channel.cancel).toHaveBeenCalledOnce();
+      expect(channel.close).toHaveBeenCalledOnce();
+    });
+
+    it("does not reopen when the channel closes during the drain", async () => {
+      const { handler, finish } = controlledHandler();
+      const { consumer, model, channel } = await openConsumer(handler);
+      const { options } = drainOptions();
+      channel.deliver();
+
+      const pending = consumer.drain(options);
+      channel.emit("close");
+      await vi.advanceTimersByTimeAsync(REOPEN_MS * 2);
+      finish(0);
+      await pending;
+
+      expect(model.channels).toHaveLength(1);
+    });
+
+    it("still drains and closes when cancel fails", async () => {
+      const { consumer, channel } = await openConsumer();
+      channel.cancel.mockRejectedValueOnce(new Error("Channel closed"));
+      const { options } = drainOptions();
+
+      const result = await consumer.drain(options);
+
+      expect(channel.close).toHaveBeenCalledOnce();
+      expect(result.aborted).toBe(false);
+    });
+
+    it("never opened: resolves without a channel", async () => {
+      const consumer = new ReviewConsumer(capturingHandler().handler, logger, { prefetch: 4 });
+      const { options } = drainOptions();
+
+      await expect(consumer.drain(options)).resolves.toEqual({
+        inFlightAtStart: 0,
+        aborted: false,
+        inFlightAtClose: 0,
+      });
+    });
   });
 });

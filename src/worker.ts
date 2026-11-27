@@ -20,9 +20,11 @@ import { handleReviewDelivery, REVIEW_CONSUMER_SETTINGS } from "./workers/review
 //
 //   npm run worker      (= node --env-file-if-exists=.env src/worker.ts)
 //
-// LAB: simplified shutdown — close the consumer channel (unacked deliveries are redelivered;
-// in-flight handlers are not awaited), stop the relay after its current batch, close channel,
-// connection and PG. Consumer draining (stop consuming, finish in-flight, ack/nack) is P5.6.
+// Graceful shutdown (P5.6): drain the review consumer (cancel, wait for in-flight up to
+// drainTimeoutMs, then abort the generations: jobs released with the attempt refunded,
+// messages requeued) and, in parallel, stop the relay after its current batch; then close
+// channels, connection, PG and /metrics. SIGKILL / the force-exit timer skip all of this:
+// leases expire and the next delivery takes the job over (one attempt spent).
 // /metrics on WORKER_METRICS_PORT (P5.5). `npm run worker` sets SERVICE_NAME=movies-worker
 // (logs and the metrics `service` label); started without it, the worker warns.
 
@@ -49,6 +51,8 @@ const workerId = `review-consumer-${randomUUID()}`;
 const publishChannel = new PublishChannel(logger.child({ component: "publish-channel" }));
 // Root-logger child: a nested child() would write `component` twice.
 const reviewLogger = rootLogger.child({ component: "review-consumer" });
+// Aborted when the shutdown drain times out: in-flight generations stop, jobs are released.
+const shutdownController = new AbortController();
 const reviewConsumer = new ReviewConsumer(
   (delivery) =>
     handleReviewDelivery(delivery, {
@@ -56,6 +60,7 @@ const reviewConsumer = new ReviewConsumer(
       generator: reviewGenerator,
       workerId,
       logger: reviewLogger,
+      shutdownSignal: shutdownController.signal,
     }),
   reviewLogger,
   {
@@ -118,16 +123,26 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
 
   logger.info({ reason }, "Worker shutting down");
 
-  // Relay batch deadline is 10 s; leave time for closing connections.
+  // Drain (25 s) + abort grace (5 s) run in parallel with the relay batch (deadline 10 s);
+  // leave 10 s for closing connections.
+  const forceExitMs =
+    REVIEW_CONSUMER_SETTINGS.drainTimeoutMs + REVIEW_CONSUMER_SETTINGS.drainAbortGraceMs + 10_000;
   const forceExitTimer = setTimeout(() => {
-    logger.fatal("Worker shutdown timed out");
+    logger.fatal({ forceExitMs }, "Worker shutdown timed out");
     process.exit(1);
-  }, 15_000);
+  }, forceExitMs);
   forceExitTimer.unref();
 
   try {
-    await reviewConsumer.close();
-    await stopOutboxRelay();
+    // Independent: the consumer settles on its own channel, the relay on the publish channel.
+    await Promise.all([
+      reviewConsumer.drain({
+        timeoutMs: REVIEW_CONSUMER_SETTINGS.drainTimeoutMs,
+        abortGraceMs: REVIEW_CONSUMER_SETTINGS.drainAbortGraceMs,
+        abortInFlight: () => shutdownController.abort(new Error("worker shutting down")),
+      }),
+      stopOutboxRelay(),
+    ]);
     await publishChannel.close();
     if (connection !== null) await connection.close();
     await PG.closeConnection();

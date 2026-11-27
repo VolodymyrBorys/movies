@@ -82,7 +82,9 @@ function setup(options: {
   generate?: { review: string; model: string } | Error;
   complete?: boolean | Error;
   release?: boolean | Error;
+  releaseForShutdown?: boolean | Error;
   fail?: boolean | Error;
+  shutdownSignal?: AbortSignal;
 } = {}) {
   const calls: string[] = [];
   const answer = <T>(name: string, value: T | Error | undefined, fallback: T) => {
@@ -95,6 +97,9 @@ function setup(options: {
     claim: vi.fn(() => answer("claim", options.claim, claimed())),
     complete: vi.fn(() => answer("complete", options.complete, true)),
     release: vi.fn(() => answer("release", options.release, true)),
+    releaseForShutdown: vi.fn(() =>
+      answer("releaseForShutdown", options.releaseForShutdown, true),
+    ),
     fail: vi.fn(() => answer("fail", options.fail, true)),
   };
   const generator: ReviewGenerator = {
@@ -110,6 +115,7 @@ function setup(options: {
       generator,
       workerId: WORKER_ID,
       logger,
+      ...(options.shutdownSignal !== undefined ? { shutdownSignal: options.shutdownSignal } : {}),
     });
     return { outcome, actions: target.actions, calls };
   };
@@ -304,6 +310,111 @@ describe("handleReviewDelivery", () => {
       expect(actions).toEqual([`retry:${tier10s?.queue}`, "ack"]);
     },
   );
+
+  describe("graceful shutdown (P5.6)", () => {
+    const aborted = () => {
+      const controller = new AbortController();
+      controller.abort(new Error("worker shutting down"));
+      return controller.signal;
+    };
+
+    it("passes a signal that fires on the shutdown abort to the generator", async () => {
+      const controller = new AbortController();
+      let seen: AbortSignal | undefined;
+      const { run, generator } = setup({ shutdownSignal: controller.signal });
+      vi.mocked(generator.generate).mockImplementationOnce(
+        (input) =>
+          new Promise((_resolve, reject) => {
+            seen = input.signal;
+            input.signal?.addEventListener("abort", () => reject(input.signal?.reason));
+          }),
+      );
+
+      const pending = run();
+      await vi.waitFor(() => expect(seen).toBeDefined());
+      expect(seen?.aborted).toBe(false);
+      controller.abort(new Error("worker shutting down"));
+
+      const { outcome } = await pending;
+      expect(outcome).toBe("shutdown_released");
+    });
+
+    it("generation fails after the abort → release with refund, requeue, no retry copy", async () => {
+      const { run, jobs } = setup({
+        generate: new Error("aborted"),
+        shutdownSignal: aborted(),
+      });
+
+      const { outcome, actions, calls } = await run();
+
+      expect(outcome).toBe("shutdown_released");
+      expect(calls).toEqual(["claim", "generate", "releaseForShutdown"]);
+      expect(jobs.releaseForShutdown).toHaveBeenCalledWith(JOB_ID, LEASE_TOKEN);
+      expect(jobs.release).not.toHaveBeenCalled();
+      expect(actions).toEqual(["requeue"]);
+    });
+
+    it("applies even on the last attempt (a shutdown is not a failure)", async () => {
+      const { run, jobs } = setup({
+        claim: claimed(REVIEW_CONSUMER_SETTINGS.maxAttempts),
+        generate: new Error("aborted"),
+        shutdownSignal: aborted(),
+      });
+
+      const { outcome } = await run();
+
+      expect(outcome).toBe("shutdown_released");
+      expect(jobs.fail).not.toHaveBeenCalled();
+    });
+
+    it("a generation that succeeds despite the abort is stored normally", async () => {
+      const { run, jobs } = setup({ shutdownSignal: aborted() });
+
+      const { outcome, actions } = await run();
+
+      expect(outcome).toBe("succeeded");
+      expect(jobs.releaseForShutdown).not.toHaveBeenCalled();
+      expect(actions).toEqual(["ack"]);
+    });
+
+    it("an error without a shutdown abort stays a normal retry", async () => {
+      const { run, jobs } = setup({
+        generate: new Error("503"),
+        shutdownSignal: new AbortController().signal,
+      });
+
+      const { outcome } = await run();
+
+      expect(outcome).toBe("retry_scheduled");
+      expect(jobs.releaseForShutdown).not.toHaveBeenCalled();
+    });
+
+    it("lease lost on the shutdown release → ack, no outcome claimed", async () => {
+      const { run } = setup({
+        generate: new Error("aborted"),
+        releaseForShutdown: false,
+        shutdownSignal: aborted(),
+      });
+
+      const { outcome, actions } = await run();
+
+      expect(outcome).toBe("lease_lost");
+      expect(actions).toEqual(["ack"]);
+    });
+
+    it("PostgreSQL down on the shutdown release → retry copy, then ack", async () => {
+      const { run } = setup({
+        generate: new Error("aborted"),
+        releaseForShutdown: new Error("connection terminated"),
+        shutdownSignal: aborted(),
+      });
+
+      const { outcome, actions } = await run();
+
+      expect(outcome).toBe("infrastructure_retry");
+      expect(actions).toEqual([`retry:${tier10s?.queue}`, "ack"]);
+    });
+  });
 
   describe("metrics", () => {
     const delivered = (outcome: string) => metricValue(reviewDeliveriesTotal, { outcome });

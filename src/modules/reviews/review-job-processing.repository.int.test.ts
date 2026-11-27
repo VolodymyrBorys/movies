@@ -281,6 +281,31 @@ describe("outcomes are guarded by the lease owner", () => {
     });
   });
 
+  it("releaseForShutdown → queued, lease cleared, attempt refunded, error kept (P5.6)", async () => {
+    const { jobId, token } = await claimedJob();
+    expect(await repo.release(jobId, token, "503")).toBe(true);
+    const second = await repo.claim(jobId, OPTIONS);
+    if (second.kind !== "claimed") throw new Error(`expected claimed, got ${second.kind}`);
+    expect(second.attempts).toBe(2);
+
+    expect(await repo.releaseForShutdown(jobId, second.leaseToken)).toBe(true);
+    expect(await job(jobId)).toMatchObject({
+      status: "queued",
+      attempts: 1,
+      locked_by: null,
+      locked_until: null,
+      last_error: "503",
+    });
+  });
+
+  it("releaseForShutdown with a token that doesn't hold the lease changes nothing", async () => {
+    const { jobId, token } = await claimedJob();
+
+    const otherClaim = "worker-a:00000000-0000-0000-0000-000000000000";
+    expect(await repo.releaseForShutdown(jobId, otherClaim)).toBe(false);
+    expect(await job(jobId)).toMatchObject({ status: "running", attempts: 1, locked_by: token });
+  });
+
   it("fail → failed, finished", async () => {
     const { jobId, token } = await claimedJob();
 
