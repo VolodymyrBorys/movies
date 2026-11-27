@@ -3,7 +3,7 @@
 _Created: 2026-11-16 · Restructured: 2026-11-23 (index only; full pre-restructure copy: `docs/sessions/archive/learning-roadmap-2026-11-23.md`)._
 _Code is the source of truth. Phase plans are **plans**, not a description of what exists._
 
-**Current phase: P5 (RabbitMQ) — details in `docs/learning/current-phase.md`.** Order decided by the owner (2026-11-19): **C** (P3 CRUD + optimistic concurrency, done early) → **D** (P7 RAG endpoints + sync review, done) → **B** (P2 k6 baseline, partly done, rest deferred) → **P5**. **No live Gemini runs** (owner, 2026-11-22): Gemini-dependent behavior is verified with mocks only.
+**Current phase: P6 (tracing + centralized logging, not started) — details in `docs/learning/current-phase.md`.** Order decided by the owner (2026-11-19): **C** (P3 CRUD + optimistic concurrency, done early) → **D** (P7 RAG endpoints + sync review, done) → **B** (P2 k6 baseline, partly done, rest deferred) → **P5** (done 2026-11-27) → **P6** (owner, 2026-11-27). **No live Gemini runs** (owner, 2026-11-22): Gemini-dependent behavior is verified with mocks only.
 
 ## Where things live
 
@@ -30,7 +30,7 @@ The goal is to evolve it **incrementally** into a production-like system and, at
 
 ## Phase status
 
-Order and scope unchanged; details in `docs/learning/phases.md` (P5: `docs/learning/current-phase.md`). ✅ done · ◐ partly done / in progress · ⏳ not started · ⏸ deferred by the owner.
+Order and scope unchanged; details in `docs/learning/phases.md` (P6: `docs/learning/current-phase.md`). ✅ done · ◐ partly done / in progress · ⏳ not started · ⏸ deferred by the owner.
 
 | Phase | Status | Open / deferred |
 | --- | --- | --- |
@@ -39,8 +39,8 @@ Order and scope unchanged; details in `docs/learning/phases.md` (P5: `docs/learn
 | P2 Load testing and baseline | ◐ P2.0 smoke passed, P2.1 cached 100–1600 req/s green | ⏸ cached 3200+, P2.2 cold, P2.3–P2.8 |
 | P3 PostgreSQL internals | ◐ block C done early (CRUD, ETag/If-Match, expand/contract NOT NULL) | rest of the phase not started |
 | P4 Redis | ⏳ | — |
-| **P5 RabbitMQ and workers** | ◐ **current**: P5.0–P5.3 done, P5.4 implemented + review fixes (uncommitted) | next: finish P5.4 (integration rerun, live run, commit), then P5.5 |
-| P6 Tracing and centralized logging | ⏳ | starts after P5 (owner) |
+| P5 RabbitMQ and workers | ✅ done 2026-11-27 (PR #1): outbox relay, review consumer, retry/DLQ, metrics/alerts/dashboard, graceful shutdown; `docs/progress/messaging.md` | ⏸ live drills (P5.4 live run, 5.5f, P5.6 SIGTERM) and P5.7 exercises not run; P5.4b reconciliation proposed |
+| **P6 Tracing and centralized logging** | ◐ **current** (2026-11-27), not started | next: plan for approval (backend, log pipeline, approvals) |
 | P7 RAG in production | ◐ D0–D6 done (endpoints, errors, deadlines, metrics, delimiters) | retrieval eval, ingestion via queue, cost controls |
 | P8 Agents / MCP / evals | ⏳ | — |
 | P9 Containers and Kubernetes | ⏳ | — |
