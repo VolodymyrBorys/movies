@@ -3,60 +3,54 @@
 Last session only; rewritten on each save. Previous checkpoints: `docs/sessions/archive/` (history, not read at session start).
 "owner" = verified by the repository owner outside the assistant sandbox. Plan: `docs/learning-roadmap.md`, active phase: `docs/learning/current-phase.md`; per-topic details: `docs/progress/`.
 
-## 2026-11-25 (session 4) · P5.3 live check, P5.4 consumer + topology
+## 2026-11-27 (session 5) · P5.4 review fixes + commit, P5.5 metrics/alerts/dashboard
 
-Branch `p5-rabbitmq` (in sync with origin at session start). Commit `19186a6` (docs: P5.3 live check).
-**P5.4 code is uncommitted** (6 modified + 12 new files under `src/`, plus docs) — commit after the
-review fixes below.
+Branch `p5-rabbitmq`, 5 commits ahead of origin at save time (push by the owner, sandbox blocks it):
+`77f976d` P5.4, `d460ca0` P5.5a–b, `30d4838` P5.5c–e, plus this docs commit.
 
 ### Completed
-- P5.3 live publish path (owner): returned → backoff retry → published after binding a temporary queue;
-  AMQP properties and outbox row correct; worker startup with the broker stopped (give up / late broker /
-  Ctrl+C → `SIGINT`, exit 0). Details: `docs/progress/messaging.md` → P5.3 → Verification.
-- P5.4 implemented (plan approved: all 5 points, broker int tests in vhost `movies_test`): topology,
-  `ReviewConsumer`, review handler, processing repository, message Zod schema, stub|fake generator,
-  worker wiring. Design table, failure modes, observed broker semantics: `messaging.md` → P5.4.
-- Requeue fallback gets a 5 s pause (explicit `nack(requeue=true)` is not counted by delivery-limit).
-- `backend-reviewer` review of P5.4: no blockers; 6 findings (see Known issues).
+- P5.4 review findings: 2 `ReviewConsumer.start()` (consumer topology failure no longer stops the relay),
+  3 pause in the handler-threw requeue, 4 per-claim lease token (`<workerId>:<uuid>` in `locked_by`),
+  5 deterministic concurrent-claim int test, 6 unit tests for `release`/`fail` throwing. Finding 1 → option c
+  (documented LAB limitation + manual SQL, `messaging.md` → P5.4 → Failure modes); DLQ-consumer variants
+  (incl. a requeue counter) rejected with reasons. Committed as P5.4.
+- P5.5a–b: worker `/metrics` (`node:http`, `WORKER_METRICS_PORT` 3002), `SERVICE_NAME` enum for logs + metrics
+  label, `message_outbox_*` counters + backlog gauges, `review_deliveries_total`, `review_generation_duration_seconds`.
+- P5.5c–e: scrape jobs `movies-worker`, `rabbitmq-detailed`; 8 alerts in group `messaging` + promtool tests +
+  runbooks; existing outbox alerts filter `job="movies-api"`; dashboard "Movies Worker (P5)".
+- `CLAUDE.md` "Current state" updated (P5.4 consumer, vhost `movies_test`, P5.5 env/metrics/observability).
 
-### Decisions (owner, 2026-11-25)
-- Constants: max 5 attempts, retry tiers 10s/30s/2m/5m, lease 120 s, deadline 90 s, prefetch 4, delivery-limit 10.
-- Env `REVIEW_GENERATOR=stub|fake`, `REVIEW_FAKE_LATENCY_MS`, `REVIEW_FAKE_FAILURE_RATE` (fake refused in production).
-- Broker integration tests in vhost `movies_test` (created by the owner).
-- Double retry layers (in-process 3 × broker 5) kept for now; decide before enabling real Gemini.
-- Requeue fallback: pause (option A), not channel close.
+### Decisions (owner, 2026-11-27)
+- Finding 1: option c now, reconciliation (b) stays proposed as P5.4b.
+- P5.5 plan approved as a whole: port 3002; `SERVICE_NAME` via config (option 2a); shared metrics registry
+  (other process's series at 0, alerts filter by `job`); commits after 5.5b and after 5.5e.
 
 ### Verification
-- Assistant: `npx tsc -p .` 0; unit 384/384; 7 mutation checks caught (list in `messaging.md` → P5.4).
-- Owner: `npm run test:integration` 77/78 (16 PG processing tests green; delivery-limit broker test failed:
-  13 × `nack(requeue=true)` never dead-lettered). Test rewritten to emulate a consumer crash (channel
-  close) → `review-topology.int.test.ts` rerun alone: 6/6 green. Full suite not rerun after that.
-- Not verified: P5.4 live run (stub → succeeded; fake failure rate 1 → tiers → failed + DLQ; superseded);
-  the requeue pause was added after the integration run (unit-tested only); `src/worker.ts` wiring has no
-  automated test; exit code of the "startup failed" path (expected 1) not captured.
+- Assistant: `npx tsc -p .` 0; unit 403/403 (excluding `src/routes`, `metrics-server.test.ts`: local port binding);
+  mutation checks caught: 5 (P5.4 fixes) + 7 (P5.5 metrics; one test first passed vacuously, fixed) + 6 rule
+  mutations (1 not caught by design, see `messaging.md` → 5.5c–e); `promtool check config|rules`, `promtool test rules` green.
+- Owner: `npm run test:integration` green after the P5.4 fixes; `metrics-server.test.ts` + `src/routes` green;
+  live worker `/metrics` with `service="movies-worker"`; broker per-queue series incl. `rabbitmq_detailed_queue_consumers`;
+  Prometheus picked up the new targets.
+- Not verified: P5.4 live run (stub → succeeded, fake → tiers → DLQ, superseded); no alert fired live yet; dashboard
+  not opened in Grafana; `rabbitmq_global_messages_redelivered_total` and `..._dead_lettered_{delivery_limit,expired}_total`
+  names (dashboard only); `FOR UPDATE` mutation of the int test not reported; `src/worker.ts` wiring has no automated test.
 
 ### Known issues
-- **Review findings 1–6 awaiting the owner's decision** — details and options: `messaging.md` → P5.4 →
-  Review. Assistant's recommendation: fix 2–6 now (setup isolation, pause in handler-throws fallback,
-  per-claim lease token, deterministic concurrency test, missing test); finding 1 (dead-lettered message ⇒
-  job `queued` forever) → option c now + reconciliation as P5.4b.
-- Pending: re-queue `review.requested` rows dead-lettered during P5.3 (SQL in `messaging.md` → P5.4 →
-  Verification; owner runs it after the P5.4 worker is live).
-- Worker logs: `service` is `movies-api`; relay/publish-channel children write `component` twice (consumer
-  uses a root child). Fix with a worker logger in P5.5.
-- `retryDelayMs` (relay, cache-invalidation worker): effective cap 256 s, 5 min cap is dead code.
-- Carried over: Gemini-dependent RAG ingest scripts fail by design; `git push` blocked in the sandbox;
-  stale `[branch "p2-k6-baseline"]` in `.git/config`; `.env.example` needs `RABBITMQ_URL=` (unconfirmed) and
-  the three `REVIEW_*` names (owner edits `.env*`); remote `p2-k6-baseline` / `p7-prompt-delimiters`
-  deletion unconfirmed; P5.1 up → down → up not reported; no mutation check of review `ON CONFLICT`;
-  low priority: possible `shutdown()` bug under `npm run dev --watch`.
+- `.env`: `SERVICE_NAME` must be a single value (`movies-api`) or absent — `movies-api|movies-worker` literally breaks
+  `npm run dev` (owner said it was added; unconfirmed where/how).
+- Review finding 1 open by design (stuck non-terminal jobs; detection: DLQ / message_outbox dead-letter alerts).
+- `ReviewDeadLetterQueueNotEmpty` fires until the DLQ is purged by hand (by design); `ReviewQueueBacklog` threshold is a guess.
+- `refreshMessageOutboxBacklogMetrics`: sequential scan of `message_outbox` every 10 s, published rows never deleted (LAB, not measured).
+- Carried over: `retryDelayMs` effective cap 256 s (5 min cap dead code); re-queue P5.3 dead-lettered outbox rows
+  (SQL in `messaging.md` → P5.4 → Verification); stale `[branch "p2-k6-baseline"]` in `.git/config`; remote
+  `p2-k6-baseline` / `p7-prompt-delimiters` deletion unconfirmed; P5.1 up → down → up not reported; no mutation check
+  of review `ON CONFLICT`; possible `shutdown()` bug under `npm run dev --watch`.
 
 ### Next steps
-1. Owner: decide on review findings 1–6 (recommendation above); assistant implements, reruns unit +
-   mutation checks; owner reruns `npm run test:integration`.
-2. Owner: P5.4 live run (steps in `messaging.md` → P5.4 → Verification).
-3. Commit P5.4; apply the `CLAUDE.md` "Current state" update (awaiting OK): worker sentence + "; review
-   consumer on `reviews.generate` (quorum, TTL retry queues, DLX `movies.dlx` → `reviews.generate.dlq`;
-   `REVIEW_GENERATOR=stub|fake`) (P5.4)"; integration line + "; broker tests use RabbitMQ vhost `movies_test`".
-4. Owner: re-queue P5.3 dead-lettered outbox rows.
-5. If chosen: plan P5.4b reconciliation; then P5.5 metrics / alerts / dashboard (DLQ > 0, consumers = 0).
+1. Owner: `git push` (5–6 commits ahead).
+2. Owner: P5.5f drills — stop worker → `WorkerDown` + `ReviewConsumersMissing`, restart → resolved; fake generator
+   with failure rate 1 → retry tiers → `exhausted` → `ReviewDeadLetterQueueNotEmpty` (also the P5.4 live run);
+   superseded case; record in the drill log (`docs/progress/observability.md`). Open the dashboard.
+3. Owner: re-queue P5.3 dead-lettered outbox rows once the worker is live.
+4. Then P5.6 graceful shutdown (consumer draining), or plan P5.4b reconciliation first (owner's choice).
