@@ -27,11 +27,28 @@ scrape_configs:
     static_configs:
       - targets: ["redis-exporter:9121"]
 
+  # Worker process on the host (`npm run worker`, WORKER_METRICS_PORT=3002): outbox relay +
+  # review consumer (P5.5).
+  - job_name: movies-worker
+    static_configs:
+      - targets: ["host.docker.internal:3002"]
+
   # RabbitMQ on the host (Homebrew), built-in rabbitmq_prometheus plugin on :15692.
-  # /metrics returns totals aggregated over all queues (no `queue` label). Per-queue series
-  # (needed for "DLQ > 0") come from /metrics/detailed or /metrics/per-object — decided in
-  # P5.5 together with the alerts.
+  # /metrics returns totals aggregated over all queues (no `queue` label): node health and
+  # rabbitmq_global_* rates.
   - job_name: rabbitmq
+    static_configs:
+      - targets: ["host.docker.internal:15692"]
+
+  # Per-queue series (DLQ depth, consumers per queue) for the alerts in the `messaging` group.
+  # Only the two metric families needed, only vhost "/" (integration tests use movies_test):
+  # /metrics/per-object would export every metric for every object — cardinality grows with
+  # each queue. Series: rabbitmq_detailed_queue_messages{,_ready,_unacked}, ..._consumers.
+  - job_name: rabbitmq-detailed
+    metrics_path: /metrics/detailed
+    params:
+      vhost: ["/"]
+      family: ["queue_coarse_metrics", "queue_consumer_count"]
     static_configs:
       - targets: ["host.docker.internal:15692"]
 

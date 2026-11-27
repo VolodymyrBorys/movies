@@ -10,7 +10,7 @@ _Read at session start. Active phase only; when it is finished, move this sectio
 - [x] P5.3 outbox relay (worker process, publisher confirms) (`00f90a8`); live publish path verified by the owner 2026-11-25 (`docs/progress/messaging.md` → P5.3)
 - [x] P5.4 consumer + topology (`77f976d`; `docs/progress/messaging.md` → P5.4). Review findings resolved 2026-11-27 (2–6 fixed, 1 → option c: documented + manual SQL + DLQ > 0 alert in P5.5); unit 388/388, integration green (owner). **Live run still pending (owner)**
 - [ ] P5.4b (proposed, not approved) reconciliation of stale non-terminal review jobs (review finding 1 option b; plan first)
-- [ ] **P5.5 metrics / alerts / dashboard — current.** Plan approved 2026-11-27 (`docs/progress/messaging.md` → P5.5). 5.5a–b done (worker `/metrics`, relay + consumer metrics; live scrape OK, owner); next: 5.5c scrape jobs → 5.5d alerts → 5.5e dashboard → 5.5f drills
+- [ ] **P5.5 metrics / alerts / dashboard — current.** Plan approved 2026-11-27 (`docs/progress/messaging.md` → P5.5). 5.5a–b done (`d460ca0`); 5.5c–e done (scrape jobs, 8 alerts, dashboard; promtool green, targets scraped); next: 5.5f drills (WorkerDown + ReviewConsumersMissing; fake failure rate 1 → DLQ alert = also the P5.4 live run)
 - [ ] P5.6 graceful shutdown
 - [ ] P5.7 exercises with the fake generator
 - [ ] P5.8 `docs/progress/messaging.md`

@@ -7,6 +7,8 @@ _Started: 2026-11-17 · Roadmap phase P1 · Code and config are the source of tr
 | Component | Where | URL |
 |---|---|---|
 | Movies API (`npm run dev`) | host | `http://localhost:3000/v1/metrics` |
+| Worker (`npm run worker`, P5.5) | host | `http://localhost:3002/metrics` |
+| RabbitMQ (Homebrew) | host | `http://localhost:15692/metrics` (aggregated), `/metrics/detailed?vhost=/&family=…` (per queue) |
 | PostgreSQL, Redis | host | — |
 | Prometheus | compose | http://localhost:9090 |
 | Alertmanager | compose (no external receivers) | http://localhost:9093 |
@@ -268,6 +270,59 @@ An event reached 20 attempts and will not be retried; that invalidation is lost.
 
 Prometheus cannot scrape an exporter container; `pg_up`/`redis_up` disappear instead of turning 0.
 1. `obs ps` and `obs logs <service>` (alias from "Start / stop").
+
+### WorkerDown
+
+`up{job="movies-worker"} == 0`: the worker process is gone (its metrics server starts first and closes last). Broker messages are not relayed and review jobs are not processed; the API keeps accepting reviews (rows pile up in `message_outbox`).
+1. Is `npm run worker` running? Its last log lines: `Worker failed to start` (exit 1: PG, broker after ~15 s, or `EADDRINUSE` on `WORKER_METRICS_PORT`).
+2. Started without `npm run worker`? Then `SERVICE_NAME` is not `movies-worker` (startup warning) — the target is still scraped, only labels differ.
+3. After restart: `MessageOutboxBacklogTooOld` resolves as the relay catches up.
+
+### RabbitMqDown
+
+Prometheus cannot scrape the broker (`rabbitmq` or `rabbitmq-detailed` job). `ReviewConsumersMissing` stays silent meanwhile (by design).
+1. `brew services list | grep rabbitmq`; `rabbitmq-diagnostics ping`.
+2. Broker up but scrape fails: `rabbitmq-plugins list | grep prometheus` (plugin must be enabled), `curl -s localhost:15692/metrics | head -3`.
+3. Impact: relay retries with backoff (outbox keeps the messages); consumer reconnects via amqplib recovery.
+
+### ReviewConsumersMissing
+
+`reviews.generate` has no consumer (or the queue is gone) while the broker is scraped. Review jobs stay `queued`.
+1. `WorkerDown`? Then fix that first.
+2. Worker up: logs `Review consumer failed to start; retrying` every 5 s → usually `PRECONDITION_FAILED` (406): a queue was declared with other arguments. Changing arguments needs the queue deleted first (`docs/progress/messaging.md` → P5.4, `topology.ts` header) — check for messages before deleting.
+3. Queue gone (deleted by hand): the consumer's reopen re-declares it; if the alert persists, restart the worker.
+
+### ReviewDeadLetterQueueNotEmpty
+
+`reviews.generate.dlq` holds messages. Nothing consumes it: the alert stays until an operator acts.
+1. Inspect (management UI → Queues → `reviews.generate.dlq` → Get messages, ack mode "Nack message requeue true"): `x-death[0].reason` = `rejected` (handler: invalid message, permanent error, attempts exhausted) or `delivery_limit` (repeated crashes before ack).
+2. Per `jobId`: `SELECT id, status, attempts, last_error FROM review_jobs WHERE id = '<jobId>';` — `failed`/`succeeded`/`superseded` = nothing to do; `queued`/`running` = stuck (review finding 1) → manual recovery SQL in `docs/progress/messaging.md` → P5.4 → Failure modes.
+3. Purge the DLQ once every message is accounted for (`rabbitmqctl purge_queue reviews.generate.dlq`).
+
+### ReviewQueueBacklog
+
+More than 50 ready messages in `reviews.generate` for 10 minutes: consumers slower than producers (threshold is a guess).
+1. `review_deliveries_total` by outcome: mostly `lease_busy`/`retry_scheduled` → generator failing or slow (`review_generation_duration_seconds`); mostly `succeeded` → capacity (prefetch 4 per worker; more workers).
+2. Consumers present? (`ReviewConsumersMissing`).
+
+### MessageOutboxBacklogTooOld
+
+Oldest unpublished `message_outbox` row is older than 2 minutes: the relay can't publish.
+1. `RabbitMqDown` / `WorkerDown`?
+2. `message_outbox_publish_total{result="returned"}` rising → no queue bound for the routing key (consumer topology not declared; `ReviewConsumersMissing`?).
+3. SQL: `SELECT id, routing_key, attempts, available_at, last_error FROM message_outbox WHERE published_at IS NULL AND dead_lettered_at IS NULL ORDER BY available_at LIMIT 20;`
+
+### MessageOutboxBacklogStale
+
+The worker hasn't refreshed the `message_outbox` gauges for over a minute, so `MessageOutboxBacklogTooOld` and `MessageOutboxDeadLetters` are blind.
+1. Worker logs: `Message outbox backlog metrics refresh failed` → PostgreSQL.
+2. No such log: the relay loop is stuck (a batch waiting on something without its deadline).
+
+### MessageOutboxDeadLetters
+
+The relay gave up on rows after 20 attempts (state from PostgreSQL; survives restarts). For `review.requested` the job stays `queued` forever (review finding 1).
+1. `SELECT id, routing_key, attempts, last_error, dead_lettered_at FROM message_outbox WHERE dead_lettered_at IS NOT NULL AND published_at IS NULL ORDER BY dead_lettered_at DESC LIMIT 20;`
+2. Fix the cause (`last_error`, usually `unroutable`), then re-queue (SQL in `docs/progress/messaging.md` → P5.4 → Verification; safe: the consumer is idempotent).
 
 ---
 

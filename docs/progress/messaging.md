@@ -11,7 +11,7 @@ _Started 2026-11-23 · branch `p5-rabbitmq`. Plan and owner decisions: `docs/lea
 | P5.2 API (`202` + job, `GET /v1/review-jobs/:id`) | done (2026-11-23): `tsc` 0, unit 282/282 (assistant); `src/routes` and `npm run test:integration` incl. `review-jobs.int.test.ts` (10 concurrent POSTs → 1 job, 1 message) green (owner); no mutation check |
 | P5.3 outbox relay (publisher confirms) | done (2026-11-23): `tsc` 0, unit 322/322 (assistant); `npm run test:integration` green incl. `outbox-relay.int.test.ts`, worker start + Ctrl+C shutdown against the local broker OK (owner); live publish path (returned → retry, temporary queue → published) passed (owner, 2026-11-25) |
 | P5.4 consumer + topology (quorum, retry TTL queues, DLX/DLQ) | implemented (2026-11-25, uncommitted): `tsc` 0, unit 384/384, 7 mutation checks caught (assistant); integration incl. broker in vhost `movies_test` green (owner). Review findings fixed 2026-11-27 (2–6 in code, 1 documented as a LAB limitation): unit 388/388, 5 more mutation checks caught (assistant); integration rerun and live run pending (owner) |
-| P5.5 metrics, alerts, dashboard | 5.5a–b (worker `/metrics`, relay + consumer metrics) done 2026-11-27: `tsc` 0, unit 403/403, 7 mutation checks caught (assistant); `metrics-server.test.ts`, `src/routes`, live scrape OK (owner). 5.5c–f not started |
+| P5.5 metrics, alerts, dashboard | 5.5a–b (worker `/metrics`, relay + consumer metrics) done 2026-11-27 (`d460ca0`): `tsc` 0, unit 403/403, 7 mutation checks caught (assistant); `metrics-server.test.ts`, `src/routes`, live scrape OK (owner). 5.5c–e (scrape jobs, 8 alerts, dashboard) done 2026-11-27: promtool check + tests green, 5 rule mutations caught (assistant); targets scraped, consumers series confirmed (owner). Drills (5.5f) pending |
 | P5.6 graceful shutdown | not started |
 | P5.7 exercises | not started |
 
@@ -254,6 +254,28 @@ Commands used:
 curl -s 'localhost:15692/metrics/detailed?vhost=/&family=queue_coarse_metrics&family=queue_consumer_count' | grep -E 'reviews\.generate' | head -20
 curl -s localhost:15692/metrics | grep -E '^rabbitmq_global_messages_(redelivered|dead_lettered|confirmed|received)' | head
 ```
+
+### 5.5c–e (implemented 2026-11-27)
+
+- Scrape jobs (`observability/prometheus/prometheus.yml`): `movies-worker` (`host.docker.internal:3002`), `rabbitmq-detailed` (`/metrics/detailed`, `vhost=/`, families `queue_coarse_metrics` + `queue_consumer_count` only — `/metrics/per-object` would export every metric per object).
+- Alerts, group `messaging` (`rules/movies.rules.yml`; runbooks `docs/progress/observability.md`):
+
+  | Alert | Expr (short) | For | Severity |
+  |---|---|---|---|
+  | `WorkerDown` | `up{job="movies-worker"} == 0` | 1m | critical |
+  | `RabbitMqDown` | `up{job=~"rabbitmq\|rabbitmq-detailed"} == 0` | 1m | critical |
+  | `ReviewConsumersMissing` | consumers on `reviews.generate` == 0, or the series absent while `rabbitmq-detailed` is up | 2m | critical |
+  | `ReviewDeadLetterQueueNotEmpty` | messages in `reviews.generate.dlq` > 0 (state: fires until purged) | — | warning |
+  | `ReviewQueueBacklog` | ready in `reviews.generate` > 50 (guess) | 10m | warning |
+  | `MessageOutboxBacklogTooOld` | oldest pending > 120 s | 2m | critical |
+  | `MessageOutboxBacklogStale` | refresh timestamp older than 60 s | 2m | warning |
+  | `MessageOutboxDeadLetters` | dead-lettered rows gauge > 0 | — | warning |
+
+  Existing `outbox` alerts now filter `job="movies-api"` (the worker exposes those series at 0; without the filter `OutboxBacklogStale` would fire from the worker's 0 timestamp whenever the API is gone — regression test added); message_outbox alerts filter `job="movies-worker"` symmetrically.
+- Dashboard `observability/grafana/dashboards/movies-worker.json` ("Movies Worker (P5)", 18 panels): health stats (worker up, consumers, DLQ, relay dead letters), ready/unacked per review queue, deliveries by outcome, generation p50/p95, relay publish results / recorded outcomes / backlog, broker dead-letter rates by reason and redeliveries.
+
+Verification (assistant, 2026-11-27): `promtool check config` OK; `promtool check rules` 19 + 17 rules; `promtool test rules tests/*.test.yml` green (14 new test cases). Rule mutations, all caught and restored: no `job` filter on `OutboxBacklogStale` / `MessageOutboxBacklogStale`, no `up == 1` guard in `ReviewConsumersMissing`, no `absent()` branch, DLQ alert matching every queue. Not caught by design: no `job` filter on `MessageOutboxBacklogTooOld` (a `max()` over the other job's 0 changes nothing). Dashboard: all 18 PromQL expressions parse (`promtool check rules` on a scratch file); not rendered in Grafana.
+Owner (2026-11-27): Prometheus picked up the new targets; `rabbitmq_detailed_queue_consumers{vhost="/",queue="reviews.generate"} 1` with the worker running (all 6 review queues listed). Still unverified: `rabbitmq_global_messages_redelivered_total`, `rabbitmq_global_messages_dead_lettered_{delivery_limit,expired}_total` (dashboard only); dashboard not yet looked at in Grafana; no alert fired live yet (5.5f).
 
 ## Setup (owner, Homebrew)
 
