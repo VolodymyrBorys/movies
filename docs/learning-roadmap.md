@@ -39,7 +39,7 @@ Order and scope unchanged; details in `docs/learning/phases.md` (P5: `docs/learn
 | P2 Load testing and baseline | ◐ P2.0 smoke passed, P2.1 cached 100–1600 req/s green | ⏸ cached 3200+, P2.2 cold, P2.3–P2.8 |
 | P3 PostgreSQL internals | ◐ block C done early (CRUD, ETag/If-Match, expand/contract NOT NULL) | rest of the phase not started |
 | P4 Redis | ⏳ | — |
-| **P5 RabbitMQ and workers** | ◐ **current**: P5.0–P5.3 done, P5.4 implemented (uncommitted, review fixes pending) | next: finish P5.4 (review fixes, live run, commit), then P5.5 |
+| **P5 RabbitMQ and workers** | ◐ **current**: P5.0–P5.3 done, P5.4 implemented + review fixes (uncommitted) | next: finish P5.4 (integration rerun, live run, commit), then P5.5 |
 | P6 Tracing and centralized logging | ⏳ | starts after P5 (owner) |
 | P7 RAG in production | ◐ D0–D6 done (endpoints, errors, deadlines, metrics, delimiters) | retrieval eval, ingestion via queue, cost controls |
 | P8 Agents / MCP / evals | ⏳ | — |

@@ -7,8 +7,18 @@
 //   TEST_PG_DATABASE  default "movies_test"; must end with "_test" (tests TRUNCATE tables)
 //   TEST_REDIS_URL    default REDIS_URL; the logical DB is always forced to 15 (tests FLUSHDB)
 //   TEST_LOG_LEVEL    default "silent"
+//   TEST_RABBITMQ_URL default RABBITMQ_URL with the vhost replaced by "movies_test"; the vhost
+//                     must end with "_test" (tests delete and purge queues there). The vhost
+//                     must exist: rabbitmqctl add_vhost movies_test (+ set_permissions).
 
 export const TEST_REDIS_DB = 15;
+export const TEST_RABBITMQ_VHOST = "movies_test";
+
+/** Vhost of an amqp URL ("" path → the default vhost "/"). */
+export function amqpVhost(url: string): string {
+  const path = new URL(url).pathname;
+  return path === "" || path === "/" ? "/" : decodeURIComponent(path.slice(1));
+}
 
 export function applyIntegrationEnv(): void {
   const database = process.env.TEST_PG_DATABASE ?? "movies_test";
@@ -33,6 +43,21 @@ export function applyIntegrationEnv(): void {
   );
   redisUrl.pathname = `/${TEST_REDIS_DB}`;
   process.env.REDIS_URL = redisUrl.toString();
+
+  const rabbitUrl = process.env.TEST_RABBITMQ_URL ?? process.env.RABBITMQ_URL;
+  if (rabbitUrl !== undefined) {
+    const url = new URL(rabbitUrl);
+    if (process.env.TEST_RABBITMQ_URL === undefined) {
+      url.pathname = `/${TEST_RABBITMQ_VHOST}`;
+    }
+    const vhost = amqpVhost(url.toString());
+    if (!vhost.endsWith("_test")) {
+      throw new Error(
+        `Refusing to run integration tests: RabbitMQ vhost "${vhost}" must end with "_test"`,
+      );
+    }
+    process.env.RABBITMQ_URL = url.toString();
+  }
 
   process.env.LOG_LEVEL = process.env.TEST_LOG_LEVEL ?? "silent";
   process.env.NODE_ENV = "test";

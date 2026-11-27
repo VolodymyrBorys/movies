@@ -8,8 +8,8 @@ _Read at session start. Active phase only; when it is finished, move this sectio
 - [x] P5.1 migration `review_jobs` + `message_outbox` (`dd57434`)
 - [x] P5.2 API: 202 + job, `GET /v1/review-jobs/:id` (`4cf17fb`); Gemini stubbed at all call sites (`57d7b59`)
 - [x] P5.3 outbox relay (worker process, publisher confirms) (`00f90a8`); live publish path verified by the owner 2026-11-25 (`docs/progress/messaging.md` → P5.3)
-- [ ] **P5.4 consumer + topology — next: owner decides on review findings 1–6, then fixes → live run → commit** (`docs/progress/messaging.md` → P5.4 → Review). Plan approved 2026-11-25 (all 5 points, broker int tests in vhost `movies_test`); implemented, uncommitted; unit 384/384, integration green (owner)
-- [ ] P5.4b (proposed, not approved) reconciliation of stale `queued` review jobs (review finding 1; plan first)
+- [ ] **P5.4 consumer + topology — next: owner reruns integration → live run → commit** (`docs/progress/messaging.md` → P5.4). Plan approved 2026-11-25 (all 5 points, broker int tests in vhost `movies_test`); implemented, uncommitted. Review findings resolved 2026-11-27 (2–6 fixed, 1 → option c: documented + manual SQL + DLQ > 0 alert in P5.5); unit 388/388
+- [ ] P5.4b (proposed, not approved) reconciliation of stale non-terminal review jobs (review finding 1 option b; plan first)
 - [ ] P5.5 metrics / alerts / dashboard
 - [ ] P5.6 graceful shutdown
 - [ ] P5.7 exercises with the fake generator

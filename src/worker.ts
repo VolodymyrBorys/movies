@@ -1,17 +1,24 @@
+import { randomUUID } from "node:crypto";
 import type { RecoveringChannelModel } from "amqplib";
 import { rabbitMqConfig, RabbitMqNotConfiguredError } from "./config/rabbitmq.ts";
 import { logger as rootLogger } from "./infrastructure/logger.ts";
 import { PG } from "./infrastructure/postgres.ts";
 import { connectRabbitMq } from "./infrastructure/rabbitmq.ts";
+import { loadReviewGeneratorConfig } from "./config/review-generator.ts";
 import { PublishChannel } from "./messaging/publish-channel.ts";
+import { ReviewConsumer } from "./messaging/review-consumer.ts";
+import { createReviewGenerator } from "./modules/reviews/review-generator.ts";
+import { reviewJobProcessingRepository } from "./modules/reviews/review-job-processing.repository.ts";
 import { startOutboxRelay, stopOutboxRelay } from "./workers/outbox-relay-runner.ts";
+import { handleReviewDelivery, REVIEW_CONSUMER_SETTINGS } from "./workers/review-handler.ts";
 
 // Worker process (P5): the only process that talks to RabbitMQ. The API writes to
-// message_outbox; this process relays it (P5.3) and, from P5.4, consumes review jobs.
+// message_outbox; this process relays it (P5.3) and consumes review jobs (P5.4).
 //
 //   npm run worker      (= node --env-file-if-exists=.env src/worker.ts)
 //
-// LAB: simplified shutdown — stop the relay after its current batch, close channel,
+// LAB: simplified shutdown — close the consumer channel (unacked deliveries are redelivered;
+// in-flight handlers are not awaited), stop the relay after its current batch, close channel,
 // connection and PG. Consumer draining (stop consuming, finish in-flight, ack/nack) is P5.6.
 // No /metrics endpoint yet (P5.5): relay outcomes are in the logs (`result` field).
 
@@ -22,7 +29,27 @@ if (rabbitMqConfig === null) {
 }
 const { url } = rabbitMqConfig;
 
+const reviewGeneratorConfig = loadReviewGeneratorConfig(process.env);
+const reviewGenerator = createReviewGenerator(reviewGeneratorConfig);
+const workerId = `review-consumer-${randomUUID()}`;
+
 const publishChannel = new PublishChannel(logger.child({ component: "publish-channel" }));
+// Root-logger child: a nested child() would write `component` twice.
+const reviewLogger = rootLogger.child({ component: "review-consumer" });
+const reviewConsumer = new ReviewConsumer(
+  (delivery) =>
+    handleReviewDelivery(delivery, {
+      jobs: reviewJobProcessingRepository,
+      generator: reviewGenerator,
+      workerId,
+      logger: reviewLogger,
+    }),
+  reviewLogger,
+  {
+    prefetch: REVIEW_CONSUMER_SETTINGS.prefetch,
+    requeueDelayMs: REVIEW_CONSUMER_SETTINGS.requeueDelayMs,
+  },
+);
 let connection: RecoveringChannelModel | null = null;
 
 let isShuttingDown = false;
@@ -37,13 +64,19 @@ async function start(): Promise<void> {
     url,
     connectionName: "movies-worker",
     logger,
-    setup: (model) => publishChannel.open(model),
+    // Re-run after every reconnect: channels and consumers die with the connection.
+    // Only the publish channel can fail the setup: a consumer topology error (e.g. 406) is
+    // retried by the consumer itself, so it doesn't take the outbox relay down with it.
+    setup: async (model) => {
+      await publishChannel.open(model);
+      await reviewConsumer.start(model);
+    },
   });
   if (isShuttingDown) return;
 
   startOutboxRelay(() => publishChannel.current());
   started = true;
-  logger.info("Worker started");
+  logger.info({ reviewGenerator: reviewGeneratorConfig.kind, workerId }, "Worker started");
 }
 
 async function shutdown(reason: string, exitCode = 0): Promise<void> {
@@ -69,6 +102,7 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
   forceExitTimer.unref();
 
   try {
+    await reviewConsumer.close();
     await stopOutboxRelay();
     await publishChannel.close();
     if (connection !== null) await connection.close();
