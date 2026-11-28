@@ -6,7 +6,7 @@ _Started 2026-11-27 · branch `p6-tracing` (from `master` `f37747f`) · Code is 
 
 | Step | State |
 |---|---|
-| 6.0 spike: SDK bootstrap, does ESM patching work | in progress: patching proven offline (assistant); live run with API + worker pending (owner); committed on `p6-tracing` |
+| 6.0 spike: SDK bootstrap, does ESM patching work | done: live run 2026-11-28 (owner) — HTTP/express/pg/redis spans in the API, amqplib publish → process in the worker; code committed on `p6-tracing`, results not yet committed |
 | 6.1–6.5, 6B | not started (see `current-phase.md`) |
 
 ## 6.0 — SDK bootstrap (spike)
@@ -28,12 +28,18 @@ _Started 2026-11-27 · branch `p6-tracing` (from `master` `f37747f`) · Code is 
 - `process.command_args` is a default resource attribute: the whole command line ends up in every span batch — a secret passed as a CLI argument would leak. Drop it in 6.1 (resource detector config).
 - `import * as http from "node:http"`: the namespace binding `http.request` is not wrapped, the default export's is; incoming requests are traced through `http.Server.prototype.emit` (wrapped). Outgoing calls via a named `request` import would be missed — we use `fetch`/undici.
 - pg span names follow the newer semconv: `pg.query:SELECT <db name>`.
+- Live run 2026-11-28 (console exporter; durations are in µs):
+  - **amqplib propagates context by itself** through message headers: `reviews.generate process` (consumer, kind 4) is a child of `publish movies.events` (producer, kind 3, root span) in one trace, and the consumer's `UPDATE review_jobs` spans and the `Review generated` log (`trace_id`) belong to it. So 6.2 only has to bridge API → outbox → relay (make the stored context the parent of the publish); the publish → consume hop needs no manual inject/extract. Retry copies (republished inside the process span) most likely carry the context too — not verified.
+  - **The relay's claim is not under a span**: each poll's `pg.query:WITH` (claim `UPDATE message_outbox`) is its own root trace, and the publish is a separate root. The `Outbox relay batch done` log has no `trace_id`. 6.2: manual span around claim → publish → mark.
+  - **Noise for 6.4**: every outbox poll (cache-invalidation in the API, relay in the worker) emits `BEGIN`/`WITH`/`COMMIT` + `pg-pool.connect` even with an empty claim (~95 traces per minute-long run per process); Prometheus scrapes (`GET /v1/metrics`, worker `GET /metrics`) and `/healthz`; express emits 6–8 `middleware - *` spans per request (74× `middleware - patched`).
+  - `instrumentation-pino` (part of auto-instrumentations) already adds `trace_id`/`span_id`/`trace_flags` to pino lines inside a span (6.3 partly free; check duplication/config there).
 
 ### Verification
 
 - Assistant (2026-11-27): `npx tsc -p .` 0; unit 418/418 (excl. `src/routes`, `metrics-server.test.ts`). Offline probes with `OTEL_TRACES_EXPORTER=console node --import ./src/instrumentation.ts`: with `module.register()` — a `pg.connect` span (EPERM, sandbox) under a manual root span; with `registerHooks` — `pg.Client.prototype.query`, express `Router.route`, `http.Server.prototype.emit`, `ConfirmChannel.prototype.publish` (also `Channel.publish/consume/ack`, `connect`) and a node-redis client method all `__wrapped`. Wrapped ≠ spans emitted.
 - Owner run 1 (`module.register()` version): only startup spans (`pg-pool.connect`, `pg.connect`, `pg.query:SELECT …`, `redis-connect`, `redis-PING`), `trace_id` present in pino logs; no HTTP spans — requests most likely not sent to this process. Run 2: started from the Kibana directory (an alias had `cd`'d there) → `ERR_MODULE_NOT_FOUND`; the `202` came from another server on :3000.
-- Not verified: HTTP/express spans for real requests; amqplib publish/consume spans with amqplib's recovering connection; span flush on shutdown (`process.exit` in `server.ts`/`worker.ts`; console exporter is synchronous, OTLP batching in 6.1 is not).
+- Owner runs 3–5 (2026-11-28, `registerHooks` version, from the project root). Run 3: both processes exited with `EADDRINUSE` (:3000, :3002 held by other API/worker processes — also the likely cause of run 1). Run 4: HTTP spans `GET /v1/movies`, `POST /v1/movies/:id/review` (202) with express, pg `BEGIN/INSERT/SELECT/COMMIT`, redis `GET/SET`; no outbox row — that movie version already had an active review job (`ON CONFLICT DO NOTHING` → existing job returned), so the worker had nothing to publish. Run 5 (new movie → review): API `INSERT INTO movies` + `cache_invalidation_outbox`, `INSERT INTO review_jobs` + `message_outbox`; worker `UPDATE message_outbox` (claim), `publish movies.events`, `reviews.generate process`, 2× `UPDATE review_jobs`, `Review generated` — API and worker in separate traces, as expected before 6.2.
+- Not verified: amqplib spans across a connection recovery; span flush on shutdown (`process.exit` in `server.ts`/`worker.ts`; console exporter is synchronous, OTLP batching in 6.1 is not).
 
 Live run (owner), from the project root, after stopping anything on :3000:
 ```
